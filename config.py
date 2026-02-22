@@ -44,6 +44,8 @@ class Config:
         self.gene_file = os.path.join(self.data_dir, 'gene_embeddings.csv')
         self.disease_file = os.path.join(self.data_dir, 'disease_embeddings.csv')
         self.triplets_file = os.path.join(self.data_dir, 'triplets.csv')
+        # 独立测试集（DrugBank）
+        self.drugbank_triplets_file = os.path.join(self.data_dir, 'drugbank_triplets.csv')
         
         # PrimeKG关系文件
         self.ppi_file = os.path.join(self.data_dir, 'ppi.csv')

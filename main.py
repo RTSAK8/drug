@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.model_selection import KFold
 import sys
 from pathlib import Path
 
@@ -35,6 +34,13 @@ def set_seed(seed: int = 42):
 
 def prepare_triplets_data(triplets_df: pd.DataFrame, data_manager: DataManager) -> pd.DataFrame:
     """准备三元组数据"""
+    if triplets_df is None or triplets_df.empty:
+        return pd.DataFrame(columns=["Drug_ID", "Gene_ID", "Disease_ID", "Label"])
+    required_cols = {"Drug_ID", "Gene_ID", "Disease_ID"}
+    if not required_cols.issubset(set(triplets_df.columns)):
+        print(f"警告: 三元组文件缺少必要列 {required_cols}，实际列: {list(triplets_df.columns)}")
+        return pd.DataFrame(columns=["Drug_ID", "Gene_ID", "Disease_ID", "Label"])
+
     prepared_df = triplets_df.copy()
 
     # 映射ID
@@ -68,9 +74,14 @@ def run_experiment(config: Config):
     disease_fea = data_manager.process_entity_features(data["disease"], "Disease_ID", data_manager.disease_to_idx)
 
     print("\n准备三元组数据...")
-    triplets_df = prepare_triplets_data(data["triplets"], data_manager)
+    train_triplets_df = prepare_triplets_data(data["triplets"], data_manager)
+    test_triplets_df = prepare_triplets_data(data.get("drugbank_triplets", pd.DataFrame()), data_manager)
 
-    global_pos_set = set(tuple(x) for x in triplets_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values)
+    if test_triplets_df.empty:
+        print("警告: drugbank_triplets 为空，将无法进行独立测试评估")
+
+    global_pos_set = set(tuple(x) for x in train_triplets_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values)
+    global_pos_set |= set(tuple(x) for x in test_triplets_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values)
 
     print("\n准备二元边...")
     global_edges = data_manager.prepare_binary_edges(data)
@@ -85,11 +96,11 @@ def run_experiment(config: Config):
     modes = [["gene"], ["disease"]]
 
     for current_mode in modes:
-        run_mode_experiment(current_mode=current_mode, triplets_df=triplets_df, global_pos_set=global_pos_set, global_edges=global_edges, data_manager=data_manager, drug_fea=drug_fea, gene_fea=gene_fea, disease_fea=disease_fea, config=config)
+        run_mode_experiment(current_mode=current_mode, train_triplets_df=train_triplets_df, test_triplets_df=test_triplets_df, global_pos_set=global_pos_set, global_edges=global_edges, data_manager=data_manager, drug_fea=drug_fea, gene_fea=gene_fea, disease_fea=disease_fea, config=config)
 
 
-def run_mode_experiment(current_mode, triplets_df, global_pos_set, global_edges, data_manager, drug_fea, gene_fea, disease_fea, config):
-    """运行单个模式的实验"""
+def run_mode_experiment(current_mode, train_triplets_df, test_triplets_df, global_pos_set, global_edges, data_manager, drug_fea, gene_fea, disease_fea, config):
+    """运行单个模式的实验（triplets 全量训练 + drugbank 独立测试）"""
     print(f"\n{'='*60}")
     print(f"开始模式: {current_mode[0]} 留出")
     print(f"{'='*60}")
@@ -100,62 +111,119 @@ def run_mode_experiment(current_mode, triplets_df, global_pos_set, global_edges,
 
         offset_edges = data_manager.get_offset_edges(global_edges, include_relations)
 
-        kf = KFold(n_splits=config.n_splits, shuffle=True, random_state=config.random_state)
-        all_fold_metrics = []
+        if test_triplets_df.empty:
+            print("跳过：drugbank_triplets 为空")
+            continue
 
-        for fold, (train_idx, val_idx) in enumerate(kf.split(triplets_df)):
-            print(f"\n--- Fold {fold+1}/{config.n_splits} ---")
+        train_df = train_triplets_df
+        test_df = test_triplets_df
 
-            train_df = triplets_df.iloc[train_idx]
-            val_df = triplets_df.iloc[val_idx]
+        train_drug_pool = train_df["Drug_ID"].unique().tolist()
+        train_gene_pool = train_df["Gene_ID"].unique().tolist()
+        train_disease_pool = train_df["Disease_ID"].unique().tolist()
 
-            train_drug_pool = train_df["Drug_ID"].unique().tolist()
-            train_gene_pool = train_df["Gene_ID"].unique().tolist()
-            train_disease_pool = train_df["Disease_ID"].unique().tolist()
+        train_neg = generate_negatives_for_fold(
+            pos_samples=train_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values,
+            drug_pool=train_drug_pool,
+            gene_pool=train_gene_pool,
+            disease_pool=train_disease_pool,
+            global_exclude=global_pos_set.copy(),
+            replace_dims=current_mode,
+            neg_ratio=config.neg_ratio,
+        )
 
-            train_neg = generate_negatives_for_fold(pos_samples=train_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values, drug_pool=train_drug_pool, gene_pool=train_gene_pool, disease_pool=train_disease_pool, global_exclude=global_pos_set.copy(), replace_dims=current_mode, neg_ratio=config.neg_ratio)
+        test_neg = generate_negatives_for_fold(
+            pos_samples=test_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values,
+            drug_pool=train_drug_pool,
+            gene_pool=train_gene_pool,
+            disease_pool=train_disease_pool,
+            global_exclude=global_pos_set.copy(),
+            replace_dims=current_mode,
+            neg_ratio=config.neg_ratio,
+        )
 
-            val_neg = generate_negatives_for_fold(pos_samples=val_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values, drug_pool=train_drug_pool, gene_pool=train_gene_pool, disease_pool=train_disease_pool, global_exclude=global_pos_set.copy(), replace_dims=current_mode, neg_ratio=config.neg_ratio)
+        train_pos_offset = apply_offsets(
+            train_df[["Drug_ID", "Gene_ID", "Disease_ID", "Label"]].values.copy(),
+            data_manager.gene_offset,
+            data_manager.disease_offset,
+        )
+        test_pos_offset = apply_offsets(
+            test_df[["Drug_ID", "Gene_ID", "Disease_ID", "Label"]].values.copy(),
+            data_manager.gene_offset,
+            data_manager.disease_offset,
+        )
+        train_neg_offset = apply_offsets(train_neg.copy(), data_manager.gene_offset, data_manager.disease_offset)
+        test_neg_offset = apply_offsets(test_neg.copy(), data_manager.gene_offset, data_manager.disease_offset)
 
-            train_pos_offset = apply_offsets(train_df[["Drug_ID", "Gene_ID", "Disease_ID", "Label"]].values.copy(), data_manager.gene_offset, data_manager.disease_offset)
-            val_pos_offset = apply_offsets(val_df[["Drug_ID", "Gene_ID", "Disease_ID", "Label"]].values.copy(), data_manager.gene_offset, data_manager.disease_offset)
-            train_neg_offset = apply_offsets(train_neg.copy(), data_manager.gene_offset, data_manager.disease_offset)
-            val_neg_offset = apply_offsets(val_neg.copy(), data_manager.gene_offset, data_manager.disease_offset)
+        train_data = np.vstack([train_pos_offset, train_neg_offset])
+        test_data = np.vstack([test_pos_offset, test_neg_offset])
 
-            train_data = np.vstack([train_pos_offset, train_neg_offset])
-            val_data = np.vstack([val_pos_offset, val_neg_offset])
+        np.random.shuffle(train_data)
+        np.random.shuffle(test_data)
 
-            np.random.shuffle(train_data)
-            np.random.shuffle(val_data)
+        # 注意：超图仅由训练集构建，避免测试集信息泄露
+        hypergraph_train_pos = build_hypergraph(
+            data=train_pos_offset,
+            ppi_data=offset_edges["ppi"],
+            dpi_data=offset_edges["dpi"],
+            ddi_data=offset_edges["ddi"],
+            protein_disease_data=offset_edges["protein_disease"],
+            gene_hyperedges=offset_edges["gene_hyperedges"],
+        )
+        hypergraph_train_neg = build_hypergraph(
+            data=train_neg_offset,
+            ppi_data=offset_edges["ppi"],
+            dpi_data=offset_edges["dpi"],
+            ddi_data=offset_edges["ddi"],
+            protein_disease_data=offset_edges["protein_disease"],
+            gene_hyperedges=offset_edges["gene_hyperedges"],
+        )
 
-            hypergraph_train_pos = build_hypergraph(data=train_pos_offset, ppi_data=offset_edges["ppi"], dpi_data=offset_edges["dpi"], ddi_data=offset_edges["ddi"], protein_disease_data=offset_edges["protein_disease"], gene_hyperedges=offset_edges["gene_hyperedges"])
+        test_metrics = train_fold_model(
+            current_mode=current_mode,
+            ablation_name=ablation_name,
+            fold=0,
+            train_data=train_data,
+            val_data=test_data,
+            train_pos=train_pos_offset,
+            val_pos=test_pos_offset,
+            hypergraph_pos=hypergraph_train_pos,
+            hypergraph_neg=hypergraph_train_neg,
+            drug_fea=drug_fea,
+            gene_fea=gene_fea,
+            disease_fea=disease_fea,
+            config=config,
+            use_checkpoint=False,
+        )
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-            hypergraph_train_neg = build_hypergraph(data=train_neg_offset, ppi_data=offset_edges["ppi"], dpi_data=offset_edges["dpi"], ddi_data=offset_edges["ddi"], protein_disease_data=offset_edges["protein_disease"], gene_hyperedges=offset_edges["gene_hyperedges"])
+        avg_metrics = {f"{k}_mean": float(v) for k, v in test_metrics.items()}
+        avg_metrics.update({f"{k}_std": 0.0 for k in test_metrics.keys()})
 
-            fold_metrics = train_fold_model(current_mode=current_mode, ablation_name=ablation_name, fold=fold, train_data=train_data, val_data=val_data, train_pos=train_pos_offset, val_pos=val_pos_offset, hypergraph_pos=hypergraph_train_pos, hypergraph_neg=hypergraph_train_neg, drug_fea=drug_fea, gene_fea=gene_fea, disease_fea=disease_fea, config=config)
+        print(f"\n{'='*60}")
+        print(f"{ablation_name} 独立测试集(DrugBank)结果:")
+        print(f"{'='*60}")
+        print(f"AUC:  {avg_metrics['auc_mean']:.4f}")
+        print(f"AUPR: {avg_metrics['aupr_mean']:.4f}")
+        print(f"F1:   {avg_metrics['f1_score_mean']:.4f}")
 
-            all_fold_metrics.append(fold_metrics)
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-        if all_fold_metrics:
-            avg_metrics = {}
-            for metric in all_fold_metrics[0].keys():
-                values = [m[metric] for m in all_fold_metrics]
-                avg_metrics[f"{metric}_mean"] = np.mean(values)
-                avg_metrics[f"{metric}_std"] = np.std(values)
-
-            print(f"\n{'='*60}")
-            print(f"{ablation_name} 5-Fold 汇总结果:")
-            print(f"{'='*60}")
-            print(f"AUC:  {avg_metrics['auc_mean']:.4f} ± {avg_metrics['auc_std']:.4f}")
-            print(f"AUPR: {avg_metrics['aupr_mean']:.4f} ± {avg_metrics['aupr_std']:.4f}")
-            print(f"F1:   {avg_metrics['f1_score_mean']:.4f} ± {avg_metrics['f1_score_std']:.4f}")
-
-            save_summary_results(mode=current_mode[0], ablation_name=ablation_name, avg_metrics=avg_metrics, all_fold_metrics=all_fold_metrics, config=vars(config))
+        save_summary_results(
+            mode=current_mode[0],
+            ablation_name=ablation_name,
+            avg_metrics=avg_metrics,
+            all_fold_metrics=[test_metrics],
+            config=vars(config),
+        )
 
 
-def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np.ndarray, val_data: np.ndarray, train_pos: np.ndarray, val_pos: np.ndarray, hypergraph_pos: torch.Tensor, hypergraph_neg: torch.Tensor, drug_fea: torch.Tensor, gene_fea: torch.Tensor, disease_fea: torch.Tensor, config: Config):
-    """训练单个fold的模型"""
+def train_fold_model(current_mode, ablation_name: str, fold: int,
+                     train_data: np.ndarray, val_data: np.ndarray,
+                     train_pos: np.ndarray, val_pos: np.ndarray,
+                     hypergraph_pos: torch.Tensor, hypergraph_neg: torch.Tensor,
+                     drug_fea: torch.Tensor, gene_fea: torch.Tensor, disease_fea: torch.Tensor,
+                     config: Config,
+                     use_checkpoint: bool = True):
+    """训练模型，并在给定评估集上评估（use_checkpoint=False 时不做训练中验证/选最优）"""
 
     bio_encoder = BioEncoder(dim_drug=drug_fea.shape[1], dim_gene=gene_fea.shape[1], dim_disease=disease_fea.shape[1], encoder_output_dim=config.encoder_output_dim)
 
@@ -175,10 +243,22 @@ def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np
     for epoch in range(config.epochs):
         train_loss = train_step(model=model, optimizer=optimizer, loss_func=criterion, drug_emb=drug_fea, gene_emb=gene_fea, disease_emb=disease_fea, hp_pos=hypergraph_pos, hp_neg=hypergraph_neg, train_data=train_data, train_pos=train_pos, epoch=epoch, alpha=config.alpha)
 
-        if epoch % 10 == 0 or epoch == config.epochs - 1:
-            auc, aupr, f1_score, threshold, mrr, hits = validate_step(model=model, drug_emb=drug_fea, gene_emb=gene_fea, disease_emb=disease_fea, hp_pos=hypergraph_pos, hp_neg=hypergraph_neg, val_data=val_data, val_pos=val_pos)
+        if use_checkpoint and (epoch % 10 == 0 or epoch == config.epochs - 1):
+            auc, aupr, f1_score, threshold, mrr, hits = validate_step(
+                model=model,
+                drug_emb=drug_fea,
+                gene_emb=gene_fea,
+                disease_emb=disease_fea,
+                hp_pos=hypergraph_pos,
+                hp_neg=hypergraph_neg,
+                val_data=val_data,
+                val_pos=val_pos,
+            )
 
-            print(f"Epoch {epoch+1:03d} | Val: AUC={auc:.4f}, AUPR={aupr:.4f}, " f"F1={f1_score:.4f}, thresh={threshold:.4f}, ")
+            print(
+                f"Epoch {epoch+1:03d} | Val: AUC={auc:.4f}, AUPR={aupr:.4f}, "
+                f"F1={f1_score:.4f}, thresh={threshold:.4f}, "
+            )
 
             if mrr > best_mrr:
                 best_mrr = mrr
@@ -186,7 +266,7 @@ def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np
 
             torch.cuda.empty_cache()
 
-    if os.path.exists(model_path):
+    if use_checkpoint and os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, map_location=device))
 
     with torch.no_grad():
@@ -206,7 +286,7 @@ def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np
         for metric, value in final_metrics.items():
             print(f"  {metric}: {value:.4f}")
 
-    if os.path.exists(model_path):
+    if use_checkpoint and os.path.exists(model_path):
         os.remove(model_path)
 
     return final_metrics

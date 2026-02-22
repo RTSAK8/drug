@@ -28,12 +28,12 @@ class DataManager:
             "gene": self.config.gene_file,
             "disease": self.config.disease_file,
             "triplets": self.config.triplets_file,
+            "drugbank_triplets": getattr(self.config, "drugbank_triplets_file", ""),
             "ppi": self.config.ppi_file,
             "dpi": self.config.dpi_file,
             "ddi": self.config.ddi_file,
             "protein_disease": self.config.protein_disease_file,
             "gene_hyperedges": self.config.gene_hyperedges_file,
-            "test_triplets": self.config.test_triplets_file,
         }
 
         data = {}
