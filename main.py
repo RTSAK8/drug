@@ -13,8 +13,8 @@ sys.path.append(str(Path(__file__).parent))
 
 from config import Config
 from data_manager import DataManager
-from models import BioEncoder, HgnnEncoder, Decoder, HGNN
-from train_utils import train_step, validate_step, build_hypergraph, apply_offsets, generate_negatives_for_fold, save_summary_results, metrics_graph_with_hits
+from models import BioEncoder, HgnnEncoder, RelationalGraphEncoder, Decoder, HGNN
+from train_utils import train_step, validate_step, build_hypergraph, build_typed_binary_edges, apply_offsets, generate_negatives_for_fold, save_summary_results, metrics_graph_with_hits
 
 # 设置设备
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -162,21 +162,23 @@ def run_mode_experiment(current_mode, train_triplets_df, test_triplets_df, globa
         np.random.shuffle(test_data)
 
         # 注意：超图仅由训练集构建，避免测试集信息泄露
+        # 超图：只包含三元组(+可选 gene_hyperedges)
         hypergraph_train_pos = build_hypergraph(
             data=train_pos_offset,
-            ppi_data=offset_edges["ppi"],
-            dpi_data=offset_edges["dpi"],
-            ddi_data=offset_edges["ddi"],
-            protein_disease_data=offset_edges["protein_disease"],
             gene_hyperedges=offset_edges["gene_hyperedges"],
         )
         hypergraph_train_neg = build_hypergraph(
             data=train_neg_offset,
+            gene_hyperedges=offset_edges["gene_hyperedges"],
+        )
+
+        # 二元关系：以普通边形式编码，并显式携带 edge_type
+        bin_edge_index, bin_edge_type = build_typed_binary_edges(
             ppi_data=offset_edges["ppi"],
             dpi_data=offset_edges["dpi"],
             ddi_data=offset_edges["ddi"],
             protein_disease_data=offset_edges["protein_disease"],
-            gene_hyperedges=offset_edges["gene_hyperedges"],
+            make_undirected=True,
         )
 
         test_metrics = train_fold_model(
@@ -189,6 +191,8 @@ def run_mode_experiment(current_mode, train_triplets_df, test_triplets_df, globa
             val_pos=test_pos_offset,
             hypergraph_pos=hypergraph_train_pos,
             hypergraph_neg=hypergraph_train_neg,
+            bin_edge_index=bin_edge_index,
+            bin_edge_type=bin_edge_type,
             drug_fea=drug_fea,
             gene_fea=gene_fea,
             disease_fea=disease_fea,
@@ -216,23 +220,31 @@ def run_mode_experiment(current_mode, train_triplets_df, test_triplets_df, globa
         )
 
 
-def train_fold_model(current_mode, ablation_name: str, fold: int,
-                     train_data: np.ndarray, val_data: np.ndarray,
-                     train_pos: np.ndarray, val_pos: np.ndarray,
-                     hypergraph_pos: torch.Tensor, hypergraph_neg: torch.Tensor,
-                     drug_fea: torch.Tensor, gene_fea: torch.Tensor, disease_fea: torch.Tensor,
-                     config: Config,
-                     use_checkpoint: bool = True):
+def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np.ndarray, val_data: np.ndarray, train_pos: np.ndarray, val_pos: np.ndarray, hypergraph_pos: torch.Tensor, hypergraph_neg: torch.Tensor, bin_edge_index: torch.Tensor, bin_edge_type: torch.Tensor, drug_fea: torch.Tensor, gene_fea: torch.Tensor, disease_fea: torch.Tensor, config: Config, use_checkpoint: bool = True):
     """训练模型，并在给定评估集上评估（use_checkpoint=False 时不做训练中验证/选最优）"""
 
     bio_encoder = BioEncoder(dim_drug=drug_fea.shape[1], dim_gene=gene_fea.shape[1], dim_disease=disease_fea.shape[1], encoder_output_dim=config.encoder_output_dim)
 
     graph_encoder = HgnnEncoder(in_channels=config.encoder_output_dim, dim_1=config.hidden_dim)
 
+    binary_graph_encoder = RelationalGraphEncoder(
+        in_channels=config.encoder_output_dim,
+        dim_1=config.hidden_dim,
+        num_relations=4,
+    )
+
     decoder_input_dim = (config.hidden_dim // 4) * 3
     decoder = Decoder(decoder_input_dim)
 
-    model = HGNN(bio_encoder=bio_encoder, graph_encoder=graph_encoder, decoder=decoder, out_channels=config.hidden_dim // 4, replace_dims=current_mode, loss_type=config.loss_type).to(device)
+    model = HGNN(
+        bio_encoder=bio_encoder,
+        graph_encoder=graph_encoder,
+        binary_graph_encoder=binary_graph_encoder,
+        decoder=decoder,
+        out_channels=config.hidden_dim // 4,
+        replace_dims=current_mode,
+        loss_type=config.loss_type,
+    ).to(device)
 
     criterion = nn.BCELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.L2)
@@ -241,7 +253,22 @@ def train_fold_model(current_mode, ablation_name: str, fold: int,
     model_path = f"best_model_{current_mode[0]}_{ablation_name}_fold{fold}.pth"
 
     for epoch in range(config.epochs):
-        train_loss = train_step(model=model, optimizer=optimizer, loss_func=criterion, drug_emb=drug_fea, gene_emb=gene_fea, disease_emb=disease_fea, hp_pos=hypergraph_pos, hp_neg=hypergraph_neg, train_data=train_data, train_pos=train_pos, epoch=epoch, alpha=config.alpha)
+        train_loss = train_step(
+            model=model,
+            optimizer=optimizer,
+            loss_func=criterion,
+            drug_emb=drug_fea,
+            gene_emb=gene_fea,
+            disease_emb=disease_fea,
+            hp_pos=hypergraph_pos,
+            hp_neg=hypergraph_neg,
+            bin_edge_index=bin_edge_index,
+            bin_edge_type=bin_edge_type,
+            train_data=train_data,
+            train_pos=train_pos,
+            epoch=epoch,
+            alpha=config.alpha,
+        )
 
         if use_checkpoint and (epoch % 10 == 0 or epoch == config.epochs - 1):
             auc, aupr, f1_score, threshold, mrr, hits = validate_step(
@@ -251,14 +278,13 @@ def train_fold_model(current_mode, ablation_name: str, fold: int,
                 disease_emb=disease_fea,
                 hp_pos=hypergraph_pos,
                 hp_neg=hypergraph_neg,
+                bin_edge_index=bin_edge_index,
+                bin_edge_type=bin_edge_type,
                 val_data=val_data,
                 val_pos=val_pos,
             )
 
-            print(
-                f"Epoch {epoch+1:03d} | Val: AUC={auc:.4f}, AUPR={aupr:.4f}, "
-                f"F1={f1_score:.4f}, thresh={threshold:.4f}, "
-            )
+            print(f"Epoch {epoch+1:03d} | Val: AUC={auc:.4f}, AUPR={aupr:.4f}, " f"F1={f1_score:.4f}, thresh={threshold:.4f}, ")
 
             if mrr > best_mrr:
                 best_mrr = mrr
@@ -273,7 +299,21 @@ def train_fold_model(current_mode, ablation_name: str, fold: int,
         val_data_tensor = torch.from_numpy(val_data).long().to(device)
         val_pos_tensor = torch.from_numpy(val_pos).long().to(device)
 
-        pred, _, mrr, ranks = model(drug_fea, gene_fea, disease_fea, hypergraph_pos, hypergraph_neg, val_data_tensor[:, 0], val_data_tensor[:, 1], val_data_tensor[:, 2], val_pos_tensor[:, 0], val_pos_tensor[:, 1], val_pos_tensor[:, 2])
+        pred, _, mrr, ranks = model(
+            drug_fea,
+            gene_fea,
+            disease_fea,
+            hypergraph_pos,
+            hypergraph_neg,
+            val_data_tensor[:, 0],
+            val_data_tensor[:, 1],
+            val_data_tensor[:, 2],
+            val_pos_tensor[:, 0],
+            val_pos_tensor[:, 1],
+            val_pos_tensor[:, 2],
+            bin_edge_index,
+            bin_edge_type,
+        )
 
         y_true = val_data[:, 3]
         y_pred = pred.cpu().numpy()

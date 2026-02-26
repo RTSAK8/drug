@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from torch_geometric.nn import HypergraphConv
+from torch_geometric.nn import HypergraphConv, RGCNConv
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -179,6 +179,58 @@ class HgnnEncoder(nn.Module):
         
         return x
 
+
+class RelationalGraphEncoder(nn.Module):
+    """Relational GNN encoder for binary edges with explicit relation types.
+
+    Uses RGCNConv over a single node space with an edge_type vector.
+    """
+
+    def __init__(self, in_channels: int, dim_1: int, num_relations: int = 4):
+        super().__init__()
+        self.num_relations = num_relations
+
+        self.conv1 = RGCNConv(in_channels, dim_1, num_relations=num_relations)
+        self.conv2 = RGCNConv(dim_1, dim_1 // 2, num_relations=num_relations)
+        self.conv3 = RGCNConv(dim_1 // 2, dim_1 // 4, num_relations=num_relations)
+
+        self.bn1 = nn.BatchNorm1d(dim_1)
+        self.bn2 = nn.BatchNorm1d(dim_1 // 2)
+        self.bn3 = nn.BatchNorm1d(dim_1 // 4)
+
+        self.act = nn.ReLU()
+        self.dropout = nn.Dropout(0.4)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for module in self.modules():
+            if hasattr(module, "reset_parameters") and module is not self:
+                try:
+                    module.reset_parameters()
+                except TypeError:
+                    pass
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_type: torch.Tensor) -> torch.Tensor:
+        if edge_index is None or edge_type is None or edge_index.numel() == 0:
+            # No binary edges included in this ablation.
+            return torch.zeros((x.size(0), self.bn3.num_features), device=x.device, dtype=x.dtype)
+
+        x = self.conv1(x, edge_index, edge_type)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.dropout(x)
+
+        x = self.conv2(x, edge_index, edge_type)
+        x = self.bn2(x)
+        x = self.act(x)
+        x = self.dropout(x)
+
+        x = self.conv3(x, edge_index, edge_type)
+        x = self.bn3(x)
+        x = self.act(x)
+        return x
+
 class Decoder(nn.Module):
     """
     解码器：预测三元组关联概率
@@ -268,13 +320,19 @@ class HGNN(nn.Module):
     """
     
     def __init__(self, bio_encoder, graph_encoder, decoder, out_channels,
-                 tau=0.07, replace_dims=None, loss_type=None):
+                 tau=0.07, replace_dims=None, loss_type=None,
+                 binary_graph_encoder: nn.Module = None):
         super(HGNN, self).__init__()
         self.bio_encoder = bio_encoder
         self.graph_encoder = graph_encoder
+        self.binary_graph_encoder = binary_graph_encoder
         self.decoder = decoder
         self.replace_dims = replace_dims if replace_dims else []
         self.loss_type = loss_type if loss_type else []
+
+        # Fusion gate between hypergraph encoder and relational binary-edge encoder.
+        # sigmoid(gate)=1 -> use hypergraph only; 0 -> use binary graph only.
+        self._fusion_gate = nn.Parameter(torch.tensor(0.0))
         
         # 对比学习参数
         if "qccl" in self.loss_type:
@@ -297,6 +355,7 @@ class HGNN(nn.Module):
         
         _reset(self.bio_encoder)
         _reset(self.graph_encoder)
+        _reset(self.binary_graph_encoder)
         _reset(self.decoder)
         if "qccl" in self.loss_type:
             _reset(self.query_encoder)
@@ -304,7 +363,9 @@ class HGNN(nn.Module):
     
     def forward(self, drug_feature, gene_feature, disease_feature,
                 edge_pos, edge_neg, drug_id, gene_id, disease_id,
-                pos_drugid, pos_geneid, pos_diseaseid):
+                pos_drugid, pos_geneid, pos_diseaseid,
+                bin_edge_index: torch.Tensor = None,
+                bin_edge_type: torch.Tensor = None):
         """
         前向传播
         
@@ -321,8 +382,28 @@ class HGNN(nn.Module):
         x_drug, x_gene, x_disease = self.bio_encoder(drug_feature, gene_feature, disease_feature)
         embed = torch.cat([x_drug, x_gene, x_disease], dim=0)
         
-        # 2. 图编码
-        graph_embed_pos = self.graph_encoder(embed, edge_pos)
+        # 2. 图编码（超图分支 + 二元关系分支）
+        hyper_embed = self.graph_encoder(embed, edge_pos) if edge_pos is not None and edge_pos.numel() > 0 else None
+
+        rel_embed = None
+        if (
+            self.binary_graph_encoder is not None
+            and bin_edge_index is not None
+            and bin_edge_type is not None
+            and bin_edge_index.numel() > 0
+            and bin_edge_type.numel() > 0
+        ):
+            rel_embed = self.binary_graph_encoder(embed, bin_edge_index, bin_edge_type)
+
+        if hyper_embed is not None and rel_embed is not None:
+            gate = torch.sigmoid(self._fusion_gate)
+            graph_embed_pos = gate * hyper_embed + (1.0 - gate) * rel_embed
+        elif hyper_embed is not None:
+            graph_embed_pos = hyper_embed
+        elif rel_embed is not None:
+            graph_embed_pos = rel_embed
+        else:
+            graph_embed_pos = embed
         
         # 3. 解码预测结果
         res = self.decoder(graph_embed_pos, drug_id, gene_id, disease_id)

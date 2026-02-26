@@ -42,34 +42,8 @@ def build_hypergraph(data: np.ndarray, ppi_data: Optional[np.ndarray] = None,
     n_triplets = len(data)
     hyper_edge_num = np.repeat(np.arange(n_triplets), 3).reshape(1, -1)
     
-    # 当前超边偏移量
+    # 当前超边偏移量（用于为 gene_hyperedges 分配新的 hyperedge_id）
     current_offset = n_triplets
-    
-    # 边类型处理
-    edge_types = [
-        ('ppi', ppi_data, 2),  # 二元边，每个边2个节点
-        ('dpi', dpi_data, 2),
-        ('ddi', ddi_data, 2),
-        ('protein_disease', protein_disease_data, 2)  
-    ]
-    
-    # 添加各种二元边
-    for edge_name, edge_data, nodes_per_edge in edge_types:
-        if edge_data is not None and edge_data.shape[1] > 0:
-            n_edges = edge_data.shape[1]  # 边的数量
-            
-            # 展开边对
-            edge_pairs = edge_data.reshape(1, -1)  # 形状 (1, 2*n_edges)
-            
-            # 为每个边的2个节点创建超边编号
-            edge_pairs_num = np.repeat(np.arange(n_edges) + current_offset, nodes_per_edge).reshape(1, -1)
-            
-            # 拼接
-            pairs = np.concatenate((pairs, edge_pairs), axis=1)
-            hyper_edge_num = np.concatenate((hyper_edge_num, edge_pairs_num), axis=1)
-            
-            # 更新偏移
-            current_offset += n_edges
     
     # 添加基因功能超边
     if gene_hyperedges and len(gene_hyperedges) > 0:
@@ -92,6 +66,57 @@ def build_hypergraph(data: np.ndarray, ppi_data: Optional[np.ndarray] = None,
     # 构建超图矩阵
     hyper_graph = np.concatenate((pairs, hyper_edge_num), axis=0)
     return torch.from_numpy(hyper_graph).long().to(device)
+
+
+def build_typed_binary_edges(
+    ppi_data: Optional[np.ndarray] = None,
+    dpi_data: Optional[np.ndarray] = None,
+    ddi_data: Optional[np.ndarray] = None,
+    protein_disease_data: Optional[np.ndarray] = None,
+    make_undirected: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build a typed ordinary edge list for binary relations.
+
+    Returns:
+        edge_index: (2, E) long tensor
+        edge_type: (E,) long tensor, where type ids are:
+            0=ppi, 1=dpi, 2=ddi, 3=protein_disease
+    """
+
+    def _append(edges_list: List[np.ndarray], types_list: List[np.ndarray], edge_data: Optional[np.ndarray], rel_type: int):
+        if edge_data is None or edge_data.size == 0 or edge_data.shape[1] == 0:
+            return
+        src = edge_data[0].astype(np.int64)
+        dst = edge_data[1].astype(np.int64)
+
+        if make_undirected:
+            src = np.concatenate([src, dst], axis=0)
+            dst = np.concatenate([dst, edge_data[0].astype(np.int64)], axis=0)
+
+        edges_list.append(np.vstack([src, dst]))
+        types_list.append(np.full((src.shape[0],), rel_type, dtype=np.int64))
+
+    edges_np: List[np.ndarray] = []
+    types_np: List[np.ndarray] = []
+
+    _append(edges_np, types_np, ppi_data, 0)
+    _append(edges_np, types_np, dpi_data, 1)
+    _append(edges_np, types_np, ddi_data, 2)
+    _append(edges_np, types_np, protein_disease_data, 3)
+
+    if not edges_np:
+        return (
+            torch.empty((2, 0), dtype=torch.long, device=device),
+            torch.empty((0,), dtype=torch.long, device=device),
+        )
+
+    edge_index = np.concatenate(edges_np, axis=1)
+    edge_type = np.concatenate(types_np, axis=0)
+
+    return (
+        torch.from_numpy(edge_index).long().to(device),
+        torch.from_numpy(edge_type).long().to(device),
+    )
 
 # =========================== 评估指标函数 ===========================
 
@@ -194,6 +219,7 @@ def train_step(model: nn.Module, optimizer: torch.optim.Optimizer,
               loss_func: nn.Module, drug_emb: torch.Tensor,
               gene_emb: torch.Tensor, disease_emb: torch.Tensor,
               hp_pos: torch.Tensor, hp_neg: torch.Tensor,
+              bin_edge_index: torch.Tensor, bin_edge_type: torch.Tensor,
               train_data: np.ndarray, train_pos: np.ndarray,
               epoch: int, alpha: float = 0.4) -> float:
     """
@@ -218,7 +244,9 @@ def train_step(model: nn.Module, optimizer: torch.optim.Optimizer,
         train_data_tensor[:, 2],  # disease_id
         train_pos_tensor[:, 0],   # pos_drugid
         train_pos_tensor[:, 1],   # pos_geneid
-        train_pos_tensor[:, 2]    # pos_diseaseid
+        train_pos_tensor[:, 2],   # pos_diseaseid
+        bin_edge_index,
+        bin_edge_type,
     )
     
     # 计算损失
@@ -245,6 +273,7 @@ def train_step(model: nn.Module, optimizer: torch.optim.Optimizer,
 def validate_step(model: nn.Module, drug_emb: torch.Tensor,
                  gene_emb: torch.Tensor, disease_emb: torch.Tensor,
                  hp_pos: torch.Tensor, hp_neg: torch.Tensor,
+                 bin_edge_index: torch.Tensor, bin_edge_type: torch.Tensor,
                  val_data: np.ndarray, val_pos: np.ndarray) -> Tuple[float, float, float, Dict]:
     """
     验证步骤
@@ -266,7 +295,9 @@ def validate_step(model: nn.Module, drug_emb: torch.Tensor,
             val_data_tensor[:, 2],
             val_pos_tensor[:, 0],
             val_pos_tensor[:, 1],
-            val_pos_tensor[:, 2]
+            val_pos_tensor[:, 2],
+            bin_edge_index,
+            bin_edge_type,
         )
         
         # 计算指标
