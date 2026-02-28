@@ -225,7 +225,15 @@ def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np
 
     bio_encoder = BioEncoder(dim_drug=drug_fea.shape[1], dim_gene=gene_fea.shape[1], dim_disease=disease_fea.shape[1], encoder_output_dim=config.encoder_output_dim)
 
-    graph_encoder = HgnnEncoder(in_channels=config.encoder_output_dim, dim_1=config.hidden_dim)
+    graph_encoder = HgnnEncoder(
+        in_channels=config.encoder_output_dim,
+        dim_1=config.hidden_dim,
+        use_residual=config.hgnn_use_residual,
+        jk=config.hgnn_jk,
+        norm=config.hgnn_norm,
+        hyperedge_dropout=config.hgnn_hyperedge_dropout,
+        dropout=config.hgnn_dropout,
+    )
 
     binary_graph_encoder = RelationalGraphEncoder(
         in_channels=config.encoder_output_dim,

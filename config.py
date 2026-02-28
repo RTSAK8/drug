@@ -27,6 +27,17 @@ class Config:
     # 模型参数
     encoder_output_dim: int = 128
     hidden_dim: int = 512
+
+    # HGNN表达增强（方法5）
+    # 残差连接通常能提升稳定性；默认关闭以保持与旧实验可比。
+    hgnn_use_residual: bool = True
+    # Jumping Knowledge: last | sum | mean | concat
+    hgnn_jk: str = "last"
+    # batch | layer
+    hgnn_norm: str = "batch"
+    # 训练时对超边incidence做dropout（0表示关闭）
+    hgnn_hyperedge_dropout: float = 0.0
+    hgnn_dropout: float = 0.4
     
     # 消融实验配置
     graph_ablation_configs: Dict[str, List[str]] = field(default_factory=lambda: {
