@@ -249,7 +249,7 @@ def train_step(model: nn.Module, optimizer: torch.optim.Optimizer,
         bin_edge_type,
     )
     
-    # 计算损失
+    # pred is logits; use BCEWithLogitsLoss for numerical stability
     target = torch.from_numpy(train_data[:, 3]).float().to(device)
     main_loss = loss_func(pred, target)
     total_loss = (1 - alpha) * main_loss + alpha * cl_loss
@@ -302,7 +302,8 @@ def validate_step(model: nn.Module, drug_emb: torch.Tensor,
         
         # 计算指标
         y_true = val_data[:, 3]
-        y_pred = pred.cpu().numpy()
+        # pred is logits; convert to probabilities for metrics
+        y_pred = torch.sigmoid(pred).cpu().numpy()
         
         auc_score, aupr_score, f1_score, threshold, hits = metrics_graph_with_hits(y_true, y_pred)
         
@@ -333,7 +334,14 @@ def apply_offsets(data: np.ndarray, gene_offset: int, disease_offset: int) -> np
 def generate_negatives_for_fold(pos_samples: np.ndarray, drug_pool: List[int],
                                gene_pool: List[int], disease_pool: List[int],
                                global_exclude: set, replace_dims: List[str],
-                               neg_ratio: int = 3) -> np.ndarray:
+                               neg_ratio: int = 3,
+                               max_attempts: int = 50,
+                               sampling: str = "uniform",
+                               freq_alpha: float = 0.75,
+                               drug_freq: Optional[Dict[int, int]] = None,
+                               gene_freq: Optional[Dict[int, int]] = None,
+                               disease_freq: Optional[Dict[int, int]] = None,
+                               rng: Optional[np.random.RandomState] = None) -> np.ndarray:
     """
     为当前fold生成负样本
     
@@ -349,41 +357,80 @@ def generate_negatives_for_fold(pos_samples: np.ndarray, drug_pool: List[int],
     Returns:
         负样本数组
     """
-    negatives = []
+    if rng is None:
+        rng = np.random.RandomState()
+
+    negatives: List[List[int]] = []
     local_exclude = set(tuple(row[:3]) for row in pos_samples)
-    
+
+    drug_pool_arr = np.asarray(drug_pool, dtype=np.int64)
+    gene_pool_arr = np.asarray(gene_pool, dtype=np.int64)
+    disease_pool_arr = np.asarray(disease_pool, dtype=np.int64)
+
+    def _weights_for(pool_arr: np.ndarray, freq_map: Optional[Dict[int, int]]) -> Optional[np.ndarray]:
+        if sampling != "frequency":
+            return None
+        if freq_map is None:
+            return None
+        freqs = np.array([freq_map.get(int(x), 1) for x in pool_arr], dtype=np.float64)
+        w = np.power(freqs, float(freq_alpha))
+        w_sum = w.sum()
+        if not np.isfinite(w_sum) or w_sum <= 0:
+            return None
+        return w / w_sum
+
+    drug_w = _weights_for(drug_pool_arr, drug_freq)
+    gene_w = _weights_for(gene_pool_arr, gene_freq)
+    disease_w = _weights_for(disease_pool_arr, disease_freq)
+
+    def _sample(pool_arr: np.ndarray, exclude_val: int, weights: Optional[np.ndarray]) -> int:
+        # Rejection sampling to avoid choosing the original entity.
+        for _ in range(max(1, max_attempts)):
+            cand = int(rng.choice(pool_arr, p=weights)) if weights is not None else int(rng.choice(pool_arr))
+            if cand != int(exclude_val):
+                return cand
+        # Fallback (rare): just pick a different index deterministically.
+        if len(pool_arr) <= 1:
+            return int(exclude_val)
+        for cand in pool_arr:
+            if int(cand) != int(exclude_val):
+                return int(cand)
+        return int(exclude_val)
+
     for sample in pos_samples:
-        d, g, c = sample[:3]
-        
-        # 生成药物维度负样本
-        if "drug" in replace_dims and len(drug_pool) > 1:
-            for _ in range(neg_ratio):
-                new_d = np.random.choice([x for x in drug_pool if x != d])
-                triplet = (new_d, g, c)
-                if triplet not in local_exclude and triplet not in global_exclude:
-                    negatives.append([new_d, g, c, 0])
-                    local_exclude.add(triplet)
-        
-        # 生成基因维度负样本
-        if "gene" in replace_dims and len(gene_pool) > 1:
-            for _ in range(neg_ratio):
-                new_g = np.random.choice([x for x in gene_pool if x != g])
-                triplet = (d, new_g, c)
-                if triplet not in local_exclude and triplet not in global_exclude:
-                    negatives.append([d, new_g, c, 0])
-                    local_exclude.add(triplet)
-        
-        # 生成疾病维度负样本
-        if "disease" in replace_dims and len(disease_pool) > 1:
-            for _ in range(neg_ratio):
-                new_c = np.random.choice([x for x in disease_pool if x != c])
-                triplet = (d, g, new_c)
-                if triplet not in local_exclude and triplet not in global_exclude:
-                    negatives.append([d, g, new_c, 0])
-                    local_exclude.add(triplet)
-    
-    global_exclude.update(local_exclude)
-    return np.array(negatives) if negatives else np.empty((0, 4))
+        d, g, c = (int(sample[0]), int(sample[1]), int(sample[2]))
+
+        if "drug" in replace_dims and len(drug_pool_arr) > 1:
+            for _ in range(int(neg_ratio)):
+                for _attempt in range(max(1, max_attempts)):
+                    new_d = _sample(drug_pool_arr, d, drug_w)
+                    triplet = (new_d, g, c)
+                    if triplet not in local_exclude and triplet not in global_exclude:
+                        negatives.append([new_d, g, c, 0])
+                        local_exclude.add(triplet)
+                        break
+
+        if "gene" in replace_dims and len(gene_pool_arr) > 1:
+            for _ in range(int(neg_ratio)):
+                for _attempt in range(max(1, max_attempts)):
+                    new_g = _sample(gene_pool_arr, g, gene_w)
+                    triplet = (d, new_g, c)
+                    if triplet not in local_exclude and triplet not in global_exclude:
+                        negatives.append([d, new_g, c, 0])
+                        local_exclude.add(triplet)
+                        break
+
+        if "disease" in replace_dims and len(disease_pool_arr) > 1:
+            for _ in range(int(neg_ratio)):
+                for _attempt in range(max(1, max_attempts)):
+                    new_c = _sample(disease_pool_arr, c, disease_w)
+                    triplet = (d, g, new_c)
+                    if triplet not in local_exclude and triplet not in global_exclude:
+                        negatives.append([d, g, new_c, 0])
+                        local_exclude.add(triplet)
+                        break
+
+    return np.array(negatives, dtype=np.int64) if negatives else np.empty((0, 4), dtype=np.int64)
 
 # =========================== 结果保存函数 ===========================
 

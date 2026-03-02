@@ -122,6 +122,11 @@ def run_mode_experiment(current_mode, train_triplets_df, test_triplets_df, globa
         train_gene_pool = train_df["Gene_ID"].unique().tolist()
         train_disease_pool = train_df["Disease_ID"].unique().tolist()
 
+        # Frequency maps for frequency-aware negative sampling (computed from training positives)
+        drug_freq = train_df["Drug_ID"].value_counts().to_dict()
+        gene_freq = train_df["Gene_ID"].value_counts().to_dict()
+        disease_freq = train_df["Disease_ID"].value_counts().to_dict()
+
         train_neg = generate_negatives_for_fold(
             pos_samples=train_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values,
             drug_pool=train_drug_pool,
@@ -130,6 +135,12 @@ def run_mode_experiment(current_mode, train_triplets_df, test_triplets_df, globa
             global_exclude=global_pos_set.copy(),
             replace_dims=current_mode,
             neg_ratio=config.neg_ratio,
+            max_attempts=config.max_attempts,
+            sampling=getattr(config, "neg_sampling", "uniform"),
+            freq_alpha=getattr(config, "neg_freq_alpha", 0.75),
+            drug_freq=drug_freq,
+            gene_freq=gene_freq,
+            disease_freq=disease_freq,
         )
 
         test_neg = generate_negatives_for_fold(
@@ -140,6 +151,12 @@ def run_mode_experiment(current_mode, train_triplets_df, test_triplets_df, globa
             global_exclude=global_pos_set.copy(),
             replace_dims=current_mode,
             neg_ratio=config.neg_ratio,
+            max_attempts=config.max_attempts,
+            sampling=getattr(config, "neg_sampling", "uniform"),
+            freq_alpha=getattr(config, "neg_freq_alpha", 0.75),
+            drug_freq=drug_freq,
+            gene_freq=gene_freq,
+            disease_freq=disease_freq,
         )
 
         train_pos_offset = apply_offsets(
@@ -246,7 +263,7 @@ def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np
         loss_type=config.loss_type,
     ).to(device)
 
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.L2)
 
     best_mrr = 0
@@ -316,7 +333,8 @@ def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np
         )
 
         y_true = val_data[:, 3]
-        y_pred = pred.cpu().numpy()
+        # pred is logits; convert to probabilities for metrics
+        y_pred = torch.sigmoid(pred).cpu().numpy()
 
         auc, aupr, best_f1_score, threshold, hits = metrics_graph_with_hits(y_true, y_pred)
 

@@ -275,7 +275,8 @@ class Decoder(nn.Module):
         x = self.dropout(x)
         
         x = self.fc3(x)
-        return torch.sigmoid(x.squeeze(dim=1))
+        # Return logits for numerical stability; apply sigmoid only for metrics.
+        return x.squeeze(dim=1)
 
 # =========================== QCCL损失函数 ===========================
 

@@ -19,6 +19,12 @@ class Config:
     data_dir: str = "./dataset"  
     neg_ratio: int = 3
     max_attempts: int = 50
+
+    # 负采样策略（方法1）
+    # uniform: 均匀随机替换（原逻辑）
+    # frequency: 按训练集实体频次^alpha 采样（更贴近真实分布，通常更难）
+    neg_sampling: str = "uniform"
+    neg_freq_alpha: float = 0.75
     
     # 交叉验证参数
     n_splits: int = 5
