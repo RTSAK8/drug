@@ -14,7 +14,7 @@ sys.path.append(str(Path(__file__).parent))
 from config import Config
 from data_manager import DataManager
 from models import BioEncoder, HgnnEncoder, RelationalGraphEncoder, Decoder, HGNN
-from train_utils import train_step, validate_step, build_hypergraph, build_typed_binary_edges, apply_offsets, generate_negatives_for_fold, save_summary_results, metrics_graph_with_hits
+from train_utils import train_step, validate_step, build_hypergraph, build_binary_edges, apply_offsets, generate_negatives_for_fold, save_summary_results, metrics_graph_with_hits
 
 # 设置设备
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -173,7 +173,7 @@ def run_mode_experiment(current_mode, train_triplets_df, test_triplets_df, globa
         )
 
         # 二元关系：以普通边形式编码，并显式携带 edge_type
-        bin_edge_index, bin_edge_type = build_typed_binary_edges(
+        bin_edge_index, bin_edge_type = build_binary_edges(
             ppi_data=offset_edges["ppi"],
             dpi_data=offset_edges["dpi"],
             ddi_data=offset_edges["ddi"],
@@ -239,6 +239,8 @@ def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np
         in_channels=config.encoder_output_dim,
         dim_1=config.hidden_dim,
         num_relations=4,
+        use_residual=getattr(config, "rgcn_use_residual", False),
+        dropout=getattr(config, "rgcn_dropout", 0.4),
     )
 
     decoder_input_dim = (config.hidden_dim // 4) * 3
