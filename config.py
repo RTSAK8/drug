@@ -46,6 +46,9 @@ class Config:
     rgcn_use_residual: bool = True
     rgcn_dropout: float = 0.4
 
+    # 分支融合方式：gate(按比例加和) | concat(拼接后投影)
+    fusion_method: str = "concat"
+
     # 消融实验配置
     graph_ablation_configs: Dict[str, List[str]] = field(
         default_factory=lambda: {

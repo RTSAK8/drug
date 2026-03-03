@@ -438,7 +438,18 @@ class HGNN(nn.Module):
     主模型
     """
 
-    def __init__(self, bio_encoder, graph_encoder, decoder, out_channels, tau=0.07, replace_dims=None, loss_type=None, binary_graph_encoder: nn.Module = None):
+    def __init__(
+        self,
+        bio_encoder,
+        graph_encoder,
+        decoder,
+        out_channels,
+        tau=0.07,
+        replace_dims=None,
+        loss_type=None,
+        binary_graph_encoder: nn.Module = None,
+        fusion_method: str = "gate",
+    ):
         super(HGNN, self).__init__()
         self.bio_encoder = bio_encoder
         self.graph_encoder = graph_encoder
@@ -447,9 +458,19 @@ class HGNN(nn.Module):
         self.replace_dims = replace_dims if replace_dims else []
         self.loss_type = loss_type if loss_type else []
 
+        # How to fuse hypergraph branch and binary-relation branch when both are present.
+        # - "gate": sigmoid gate weighted sum (default, backward compatible)
+        # - "concat": concatenate then project back to out_channels
+        self.fusion_method = str(fusion_method).lower().strip() if fusion_method is not None else "gate"
+        if self.fusion_method not in {"gate", "concat"}:
+            raise ValueError(f"Unsupported fusion_method: {fusion_method}. Use 'gate' or 'concat'.")
+
         # Fusion gate between hypergraph encoder and relational binary-edge encoder.
         # sigmoid(gate)=1 -> use hypergraph only; 0 -> use binary graph only.
         self._fusion_gate = nn.Parameter(torch.tensor(0.0))
+
+        # Concat fusion projector (keeps output dim unchanged so Decoder stays the same).
+        self.concat_fuse_proj = nn.Linear(out_channels * 2, out_channels)
 
         # 对比学习参数
         if "qccl" in self.loss_type:
@@ -471,6 +492,10 @@ class HGNN(nn.Module):
         _reset(self.graph_encoder)
         _reset(self.binary_graph_encoder)
         _reset(self.decoder)
+        if hasattr(self, "concat_fuse_proj") and isinstance(self.concat_fuse_proj, nn.Linear):
+            nn.init.xavier_uniform_(self.concat_fuse_proj.weight)
+            if self.concat_fuse_proj.bias is not None:
+                nn.init.zeros_(self.concat_fuse_proj.bias)
         if "qccl" in self.loss_type:
             _reset(self.query_encoder)
             _reset(self.conditional_entity_encoder)
@@ -500,8 +525,12 @@ class HGNN(nn.Module):
             rel_embed = self.binary_graph_encoder(embed, bin_edge_index, bin_edge_type)
 
         if hyper_embed is not None and rel_embed is not None:
-            gate = torch.sigmoid(self._fusion_gate)
-            graph_embed_pos = gate * hyper_embed + (1.0 - gate) * rel_embed
+            if self.fusion_method == "concat":
+                graph_embed_pos = self.concat_fuse_proj(torch.cat([hyper_embed, rel_embed], dim=1))
+            else:
+                gate = torch.sigmoid(self._fusion_gate)
+                graph_embed_pos = gate * hyper_embed + (1.0 - gate) * rel_embed
+        # 这部分删去不影响
         elif hyper_embed is not None:
             graph_embed_pos = hyper_embed
         elif rel_embed is not None:

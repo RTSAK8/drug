@@ -254,6 +254,7 @@ def train_fold_model(current_mode, ablation_name: str, fold: int, train_data: np
         out_channels=config.hidden_dim // 4,
         replace_dims=current_mode,
         loss_type=config.loss_type,
+        fusion_method=getattr(config, "fusion_method", "gate"),
     ).to(device)
 
     criterion = nn.BCELoss()
