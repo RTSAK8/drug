@@ -10,7 +10,7 @@ from typing import Dict, List
 @dataclass
 class Config:
     """实验配置类"""
-
+    
     # 训练参数
     epochs: int = 1000
     learning_rate: float = 0.005
@@ -48,6 +48,11 @@ class Config:
 
     # 分支融合方式：gate(按比例加和) | concat(拼接后投影)
     fusion_method: str = "concat"
+
+    # wandb配置
+    use_wandb: bool = True
+    wandb_project: str = "Drug Effect Prediction"
+    wandb_entity: str = ""
 
     # 消融实验配置
     graph_ablation_configs: Dict[str, List[str]] = field(
