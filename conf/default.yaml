@@ -1,0 +1,46 @@
+epochs: 1000
+learning_rate: 0.005
+alpha: 0.4
+L2: 1e-4
+loss_type:
+  - qccl
+
+data_dir: ./dataset
+neg_ratio: 3
+max_attempts: 50
+
+n_splits: 5
+random_state: 42
+
+encoder_output_dim: 128
+hidden_dim: 512
+
+hgnn_use_residual: true
+hgnn_jk: last
+hgnn_norm: batch
+hgnn_hyperedge_dropout: 0.0
+hgnn_dropout: 0.4
+
+rgcn_use_residual: true
+rgcn_dropout: 0.4
+fusion_method: concat
+
+use_wandb: true
+wandb_project: Drug Effect Prediction
+wandb_entity: ""
+wandb_name_prefix: final
+wandb_run_index: 1
+
+graph_ablation_configs:
+  WithoutGeneHyperedges:
+    - ppi
+    - dpi
+    - ddi
+    - protein_disease
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

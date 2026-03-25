@@ -23,12 +23,15 @@ def _init_wandb_run(config: Config, data_manager, ablation_count: int):
 
     project = getattr(config, "wandb_project", "protein-hgnn")
     entity = getattr(config, "wandb_entity", None)
+    wandb_name_prefix = str(getattr(config, "wandb_name_prefix", "XXX"))
+    wandb_run_index = int(getattr(config, "wandb_run_index", 1))
+    run_name = f"{wandb_name_prefix}_{wandb_run_index}"
 
     run = wandb.init(
         project=project,
         entity=entity,
         group="mode_comparison",
-        # name="mode_gene_vs_disease",
+        name=run_name,
         config=vars(config),
         reinit=True,
     )

@@ -1,7 +1,15 @@
+import hydra
+from omegaconf import DictConfig
+
 from config import Config
 from utils.experiment import run_experiment
 
 
-if __name__ == "__main__":
-    config = Config()
+@hydra.main(version_base=None, config_path="conf", config_name="default")
+def main(cfg: DictConfig):
+    config = Config.from_omegaconf(cfg)
     run_experiment(config)
+
+
+if __name__ == "__main__":
+    main()

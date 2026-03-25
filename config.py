@@ -3,8 +3,10 @@
 """
 
 import os
-from dataclasses import dataclass, field
-from typing import Dict, List
+from dataclasses import dataclass, field, fields
+from typing import Any, Dict, List, Mapping
+
+from omegaconf import DictConfig, OmegaConf
 
 
 @dataclass
@@ -32,7 +34,7 @@ class Config:
     hidden_dim: int = 512
 
     # HGNN表达增强（方法5）
-    # 残差连接通常能提升稳定性；默认关闭以保持与旧实验可比。
+    # 残差连接通常能提升稳定性
     hgnn_use_residual: bool = True
     # Jumping Knowledge: last | sum | mean | concat
     hgnn_jk: str = "last"
@@ -53,6 +55,8 @@ class Config:
     use_wandb: bool = True
     wandb_project: str = "Drug Effect Prediction"
     wandb_entity: str = ""
+    wandb_name_prefix: str = "XXX"
+    wandb_run_index: int = 1
 
     # 消融实验配置
     graph_ablation_configs: Dict[str, List[str]] = field(
@@ -65,6 +69,32 @@ class Config:
             # 'AllRelations': ['ppi', 'dpi', 'ddi', 'gene_hyperedges'],  # 所有关系
         }
     )
+
+    @classmethod
+    def from_omegaconf(cls, cfg: Any = None) -> "Config":
+        """将Hydra/OmegaConf配置安全转换为Config对象。"""
+        if cfg is None:
+            return cls()
+
+        if isinstance(cfg, DictConfig):
+            cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+        elif isinstance(cfg, Mapping):
+            cfg_dict = dict(cfg)
+        else:
+            raise TypeError("cfg must be a DictConfig or mapping")
+
+        if not isinstance(cfg_dict, dict):
+            raise TypeError("resolved config must be a dictionary")
+
+        cfg_dict.pop("hydra", None)
+
+        valid_fields = {item.name for item in fields(cls)}
+        unknown_keys = sorted(set(cfg_dict.keys()) - valid_fields)
+        if unknown_keys:
+            raise ValueError(f"Unknown config keys: {unknown_keys}")
+
+        init_kwargs = {k: v for k, v in cfg_dict.items() if k in valid_fields}
+        return cls(**init_kwargs)
 
     def __post_init__(self):
         # 核心数据文件
