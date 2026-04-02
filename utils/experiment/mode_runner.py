@@ -159,6 +159,14 @@ def run_mode_experiment(
         print(f"AUC:  {avg_metrics['auc_mean']:.4f}")
         print(f"AUPR: {avg_metrics['aupr_mean']:.4f}")
         print(f"F1:   {avg_metrics['f1_score_mean']:.4f}")
+        if "mrr_mean" in avg_metrics:
+            print(f"MRR:  {avg_metrics['mrr_mean']:.4f}")
+        if "hit@1_mean" in avg_metrics:
+            print(f"Hit@1:{avg_metrics['hit@1_mean']:.4f}")
+        if "hit@3_mean" in avg_metrics:
+            print(f"Hit@3:{avg_metrics['hit@3_mean']:.4f}")
+        if "hit@5_mean" in avg_metrics:
+            print(f"Hit@5:{avg_metrics['hit@5_mean']:.4f}")
 
         if wandb_run is not None:
             mode_key = current_mode[0]
@@ -166,6 +174,10 @@ def run_mode_experiment(
             wandb_run.summary[f"{mode_key}/test/aupr"] = float(test_metrics.get("aupr", 0.0))
             wandb_run.summary[f"{mode_key}/test/f1_score"] = float(test_metrics.get("f1_score", 0.0))
             wandb_run.summary[f"{mode_key}/test/threshold"] = float(test_metrics.get("threshold", 0.0))
+            wandb_run.summary[f"{mode_key}/test/mrr"] = float(test_metrics.get("mrr", 0.0))
+            wandb_run.summary[f"{mode_key}/test/hit@1"] = float(test_metrics.get("hit@1", 0.0))
+            wandb_run.summary[f"{mode_key}/test/hit@3"] = float(test_metrics.get("hit@3", 0.0))
+            wandb_run.summary[f"{mode_key}/test/hit@5"] = float(test_metrics.get("hit@5", 0.0))
 
         save_summary_results(
             mode=current_mode[0],

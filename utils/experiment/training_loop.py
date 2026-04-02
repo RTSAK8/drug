@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from config import Config
 from models import BioEncoder, HgnnEncoder, RelationalGraphEncoder, Decoder, HGNN
-from train_utils import train_step, validate_step, metrics_graph_with_hits
+from train_utils import train_step, validate_step, metrics_graph_with_hits, calculate_hits_ranking_based
 
 
 # 设置设备
@@ -176,9 +176,19 @@ def train_fold_model(
         y_true = val_data[:, 3]
         y_pred = pred.cpu().numpy()
 
-        auc, aupr, best_f1_score, threshold, hits = metrics_graph_with_hits(y_true, y_pred)
+        auc, aupr, best_f1_score, threshold, _ = metrics_graph_with_hits(y_true, y_pred)
+        rank_hits = calculate_hits_ranking_based(ranks, [1, 3, 5])
 
-        final_metrics = {"auc": auc, "aupr": aupr, "f1_score": best_f1_score, "threshold": threshold}
+        final_metrics = {
+            "auc": auc,
+            "aupr": aupr,
+            "f1_score": best_f1_score,
+            "threshold": threshold,
+            "mrr": float(mrr),
+            "hit@1": float(rank_hits["hit@1"]),
+            "hit@3": float(rank_hits["hit@3"]),
+            "hit@5": float(rank_hits["hit@5"]),
+        }
 
         print(f"\n最终测试结果:")
         for metric, value in final_metrics.items():

@@ -104,18 +104,18 @@ def save_summary_results(mode: str, ablation_name: str, avg_metrics: Dict, all_f
         "auc_mean": avg_metrics.get("auc_mean", 0),
         "aupr_mean": avg_metrics.get("aupr_mean", 0),
         "f1_score_mean": avg_metrics.get("f1_score_mean", 0),
-        # 'mrr_mean': avg_metrics.get('mrr_mean', 0),
-        # 'hit@1_mean': avg_metrics.get('hit@1_mean', 0),
-        # 'hit@3_mean': avg_metrics.get('hit@3_mean', 0),
-        # 'hit@5_mean': avg_metrics.get('hit@5_mean', 0),
-        # # 标准差
-        # 'auc_std': avg_metrics.get('auc_std', 0),
-        # 'aupr_std': avg_metrics.get('aupr_std', 0),
-        # 'f1_score_std': avg_metrics.get('f1_score_std', 0),
-        # 'mrr_std': avg_metrics.get('mrr_std', 0),
-        # 'hit@1_std': avg_metrics.get('hit@1_std', 0),
-        # 'hit@3_std': avg_metrics.get('hit@3_std', 0),
-        # 'hit@5_std': avg_metrics.get('hit@5_std', 0),
+        "mrr_mean": avg_metrics.get("mrr_mean", 0),
+        "hit@1_mean": avg_metrics.get("hit@1_mean", 0),
+        "hit@3_mean": avg_metrics.get("hit@3_mean", 0),
+        "hit@5_mean": avg_metrics.get("hit@5_mean", 0),
+        # 标准差
+        "auc_std": avg_metrics.get("auc_std", 0),
+        "aupr_std": avg_metrics.get("aupr_std", 0),
+        "f1_score_std": avg_metrics.get("f1_score_std", 0),
+        "mrr_std": avg_metrics.get("mrr_std", 0),
+        "hit@1_std": avg_metrics.get("hit@1_std", 0),
+        "hit@3_std": avg_metrics.get("hit@3_std", 0),
+        "hit@5_std": avg_metrics.get("hit@5_std", 0),
     }
 
     # 可选：添加每个fold的原始值（展开为列）

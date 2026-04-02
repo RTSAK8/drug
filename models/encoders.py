@@ -2,6 +2,7 @@
 编码器模块
 """
 
+import math
 import torch
 import torch.nn as nn
 from torch_geometric.nn import HypergraphConv, RGCNConv
@@ -53,6 +54,12 @@ class BioEncoder(nn.Module):
 class HgnnEncoder(nn.Module):
     """
     超图神经网络编码器
+
+    版本说明：
+    1. 残差顺序改为：conv -> norm -> residual add -> act -> dropout
+    2. 只在前两层加残差
+    3. 残差强度为可学习门控：sigmoid(gate)
+    4. 第三层不加残差
     """
 
     def __init__(
@@ -64,6 +71,7 @@ class HgnnEncoder(nn.Module):
         norm: str = "batch",
         hyperedge_dropout: float = 0.0,
         dropout: float = 0.4,
+        residual_init: float = 0.2,
     ):
         super(HgnnEncoder, self).__init__()
 
@@ -71,6 +79,12 @@ class HgnnEncoder(nn.Module):
         self.jk = jk
         self.norm = norm
         self.hyperedge_dropout = float(hyperedge_dropout)
+
+        if not (0.0 < residual_init < 1.0):
+            raise ValueError("residual_init must be in (0, 1), e.g. 0.1")
+
+        # 将初始门控值映射到 sigmoid 反函数空间
+        gate_init = math.log(residual_init / (1.0 - residual_init))
 
         # 三层超图卷积
         self.conv1 = HypergraphConv(in_channels, dim_1)
@@ -89,15 +103,19 @@ class HgnnEncoder(nn.Module):
         self.act = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
 
-        # Residual projections (dimension-matching)
+        # 只在前两层保留 residual projection
         if self.use_residual:
             self.res_proj1 = nn.Linear(in_channels, dim_1, bias=False)
             self.res_proj2 = nn.Linear(dim_1, dim_1 // 2, bias=False)
-            self.res_proj3 = nn.Linear(dim_1 // 2, dim_1 // 4, bias=False)
+
+            # 可学习门控参数，经过 sigmoid 后落在 (0, 1)
+            self.res_gate1 = nn.Parameter(torch.tensor(gate_init, dtype=torch.float32))
+            self.res_gate2 = nn.Parameter(torch.tensor(gate_init, dtype=torch.float32))
         else:
             self.res_proj1 = None
             self.res_proj2 = None
-            self.res_proj3 = None
+            self.register_parameter("res_gate1", None)
+            self.register_parameter("res_gate2", None)
 
         # Jumping Knowledge (multi-layer fusion)
         out_dim = dim_1 // 4
@@ -106,7 +124,6 @@ class HgnnEncoder(nn.Module):
             raise ValueError(f"Unsupported jk mode: {self.jk}")
 
         if self.jk != "last":
-            # Project all layer outputs to out_dim, then fuse.
             self.jk_proj1 = nn.Linear(dim_1, out_dim, bias=False)
             self.jk_proj2 = nn.Linear(dim_1 // 2, out_dim, bias=False)
             self.jk_proj3 = nn.Identity()
@@ -130,7 +147,6 @@ class HgnnEncoder(nn.Module):
                 except TypeError:
                     pass
 
-        # Ensure linear layers have sane init even if nested modules don't expose reset.
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
@@ -144,38 +160,56 @@ class HgnnEncoder(nn.Module):
         keep_prob = 1.0 - self.hyperedge_dropout
         mask = torch.rand(edge_index.size(1), device=edge_index.device) < keep_prob
         if not torch.any(mask):
-            # Keep at least one incidence to avoid empty edge_index.
             mask[torch.randint(0, edge_index.size(1), (1,), device=edge_index.device)] = True
         return edge_index[:, mask]
+
+    def _apply_residual(
+        self,
+        out: torch.Tensor,
+        x_in: torch.Tensor,
+        proj: nn.Module,
+        gate_param: nn.Parameter,
+    ) -> torch.Tensor:
+        if self.use_residual and proj is not None and gate_param is not None:
+            gate = torch.sigmoid(gate_param)
+            out = out + gate * proj(x_in)
+        return out
+
+    def get_residual_gates(self):
+        """
+        返回当前两层残差门控值，便于训练后观察。
+        """
+        if not self.use_residual:
+            return None
+        return {
+            "layer1": float(torch.sigmoid(self.res_gate1).detach().cpu()),
+            "layer2": float(torch.sigmoid(self.res_gate2).detach().cpu()),
+        }
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         edge_index = self._drop_hyperedge_incidence(edge_index)
 
-        # Layer 1
+        # Layer 1: 有残差 + 可学习门控
         x_in = x
         x1 = self.conv1(x, edge_index)
         x1 = self.norm1(x1)
+        x1 = self._apply_residual(x1, x_in, self.res_proj1, self.res_gate1)
         x1 = self.act(x1)
         x1 = self.dropout(x1)
-        if self.use_residual and self.res_proj1 is not None:
-            x1 = x1 + self.res_proj1(x_in)
 
-        # Layer 2
+        # Layer 2: 有残差 + 可学习门控
         x_in = x1
         x2 = self.conv2(x1, edge_index)
         x2 = self.norm2(x2)
+        x2 = self._apply_residual(x2, x_in, self.res_proj2, self.res_gate2)
         x2 = self.act(x2)
         x2 = self.dropout(x2)
-        if self.use_residual and self.res_proj2 is not None:
-            x2 = x2 + self.res_proj2(x_in)
 
-        # Layer 3
-        x_in = x2
+        # Layer 3: 无残差
         x3 = self.conv3(x2, edge_index)
         x3 = self.norm3(x3)
         x3 = self.act(x3)
-        if self.use_residual and self.res_proj3 is not None:
-            x3 = x3 + self.res_proj3(x_in)
+        # 最后一层不 dropout，保持输出更稳定
 
         if self.jk == "last":
             return x3
@@ -189,20 +223,38 @@ class HgnnEncoder(nn.Module):
             return self.jk_fuse(fused)
         if self.jk == "sum":
             return p1 + p2 + p3
-        # mean
         return (p1 + p2 + p3) / 3.0
 
 
 class RelationalGraphEncoder(nn.Module):
-    """Relational GNN encoder for binary edges with explicit relation types.
-
+    """
+    Relational GNN encoder for binary edges with explicit relation types.
     Uses RGCNConv over a single node space with an edge_type vector.
+
+    版本说明：
+    1. 残差顺序改为：conv -> norm -> residual add -> act -> dropout
+    2. 只在前两层加残差
+    3. 残差强度为可学习门控：sigmoid(gate)
+    4. 第三层不加残差
     """
 
-    def __init__(self, in_channels: int, dim_1: int, num_relations: int = 4, use_residual: bool = False, dropout: float = 0.4):
+    def __init__(
+        self,
+        in_channels: int,
+        dim_1: int,
+        num_relations: int = 4,
+        use_residual: bool = False,
+        dropout: float = 0.4,
+        residual_init: float = 0.2,
+    ):
         super().__init__()
         self.num_relations = num_relations
         self.use_residual = bool(use_residual)
+
+        if not (0.0 < residual_init < 1.0):
+            raise ValueError("residual_init must be in (0, 1), e.g. 0.1")
+
+        gate_init = math.log(residual_init / (1.0 - residual_init))
 
         self.conv1 = RGCNConv(in_channels, dim_1, num_relations=num_relations)
         self.conv2 = RGCNConv(dim_1, dim_1 // 2, num_relations=num_relations)
@@ -215,15 +267,18 @@ class RelationalGraphEncoder(nn.Module):
         self.act = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
 
-        # Residual projections (dimension-matching)
+        # 只在前两层保留 residual projection
         if self.use_residual:
             self.res_proj1 = nn.Linear(in_channels, dim_1, bias=False)
             self.res_proj2 = nn.Linear(dim_1, dim_1 // 2, bias=False)
-            self.res_proj3 = nn.Linear(dim_1 // 2, dim_1 // 4, bias=False)
+
+            self.res_gate1 = nn.Parameter(torch.tensor(gate_init, dtype=torch.float32))
+            self.res_gate2 = nn.Parameter(torch.tensor(gate_init, dtype=torch.float32))
         else:
             self.res_proj1 = None
             self.res_proj2 = None
-            self.res_proj3 = None
+            self.register_parameter("res_gate1", None)
+            self.register_parameter("res_gate2", None)
 
         self.reset_parameters()
 
@@ -241,31 +296,53 @@ class RelationalGraphEncoder(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
+    def _apply_residual(
+        self,
+        out: torch.Tensor,
+        x_in: torch.Tensor,
+        proj: nn.Module,
+        gate_param: nn.Parameter,
+    ) -> torch.Tensor:
+        if self.use_residual and proj is not None and gate_param is not None:
+            gate = torch.sigmoid(gate_param)
+            out = out + gate * proj(x_in)
+        return out
+
+    def get_residual_gates(self):
+        """
+        返回当前两层残差门控值，便于训练后观察。
+        """
+        if not self.use_residual:
+            return None
+        return {
+            "layer1": float(torch.sigmoid(self.res_gate1).detach().cpu()),
+            "layer2": float(torch.sigmoid(self.res_gate2).detach().cpu()),
+        }
+
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_type: torch.Tensor) -> torch.Tensor:
         if edge_index is None or edge_type is None or edge_index.numel() == 0:
-            # No binary edges included in this ablation.
             return torch.zeros((x.size(0), self.bn3.num_features), device=x.device, dtype=x.dtype)
 
+        # Layer 1: 有残差 + 可学习门控
         x_in = x
         x1 = self.conv1(x, edge_index, edge_type)
         x1 = self.bn1(x1)
+        x1 = self._apply_residual(x1, x_in, self.res_proj1, self.res_gate1)
         x1 = self.act(x1)
         x1 = self.dropout(x1)
-        if self.use_residual and self.res_proj1 is not None:
-            x1 = x1 + self.res_proj1(x_in)
 
+        # Layer 2: 有残差 + 可学习门控
         x_in = x1
         x2 = self.conv2(x1, edge_index, edge_type)
         x2 = self.bn2(x2)
+        x2 = self._apply_residual(x2, x_in, self.res_proj2, self.res_gate2)
         x2 = self.act(x2)
         x2 = self.dropout(x2)
-        if self.use_residual and self.res_proj2 is not None:
-            x2 = x2 + self.res_proj2(x_in)
 
-        x_in = x2
+        # Layer 3: 无残差
         x3 = self.conv3(x2, edge_index, edge_type)
         x3 = self.bn3(x3)
         x3 = self.act(x3)
-        if self.use_residual and self.res_proj3 is not None:
-            x3 = x3 + self.res_proj3(x_in)
+        # 最后一层不 dropout，保持输出更稳定
+
         return x3
