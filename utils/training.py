@@ -12,7 +12,22 @@ from .metrics import calculate_hits_ranking_based, metrics_graph_with_hits
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def train_step(model: nn.Module, optimizer: torch.optim.Optimizer, loss_func: nn.Module, drug_emb: torch.Tensor, gene_emb: torch.Tensor, disease_emb: torch.Tensor, hp_pos: torch.Tensor, hp_neg: torch.Tensor, bin_edge_index: torch.Tensor, bin_edge_type: torch.Tensor, train_data: np.ndarray, train_pos: np.ndarray, epoch: int, alpha: float = 0.4) -> Dict[str, float]:
+def train_step(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    loss_func: nn.Module,
+    drug_emb: torch.Tensor,
+    gene_emb: torch.Tensor,
+    disease_emb: torch.Tensor,
+    hp_pos: torch.Tensor,
+    hp_neg: torch.Tensor,
+    bin_edge_index: torch.Tensor,
+    bin_edge_type: torch.Tensor,
+    train_data: np.ndarray,
+    train_pos: np.ndarray,
+    epoch: int,
+    alpha: float = 0.4,
+) -> Dict[str, float]:
     """
     单步训练函数
 
