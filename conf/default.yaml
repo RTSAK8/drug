@@ -26,9 +26,9 @@ rgcn_dropout: 0.4
 fusion_method: concat
 
 use_wandb: true
-wandb_project: Drug Effect Prediction
+wandb_project: Drug Prediction
 wandb_entity: ""
-wandb_name_prefix: final
+wandb_name_prefix: ours
 wandb_run_index: 1
 
 graph_ablation_configs:

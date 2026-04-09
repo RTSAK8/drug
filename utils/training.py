@@ -8,8 +8,9 @@ import numpy as np
 from typing import Dict, Tuple
 
 from .metrics import calculate_hits_ranking_based, metrics_graph_with_hits
+from .runtime import get_device
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 
 
 def train_step(
@@ -85,7 +86,18 @@ def train_step(
     }
 
 
-def validate_step(model: nn.Module, drug_emb: torch.Tensor, gene_emb: torch.Tensor, disease_emb: torch.Tensor, hp_pos: torch.Tensor, hp_neg: torch.Tensor, bin_edge_index: torch.Tensor, bin_edge_type: torch.Tensor, val_data: np.ndarray, val_pos: np.ndarray) -> Tuple[float, float, float, Dict]:
+def validate_step(
+    model: nn.Module,
+    drug_emb: torch.Tensor,
+    gene_emb: torch.Tensor,
+    disease_emb: torch.Tensor,
+    hp_pos: torch.Tensor,
+    hp_neg: torch.Tensor,
+    bin_edge_index: torch.Tensor,
+    bin_edge_type: torch.Tensor,
+    val_data: np.ndarray,
+    val_pos: np.ndarray,
+) -> Tuple[float, float, float, Dict]:
     """
     验证步骤
 

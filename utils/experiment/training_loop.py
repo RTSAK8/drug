@@ -6,11 +6,13 @@ import torch.nn as nn
 
 from config import Config
 from models import BioEncoder, HgnnEncoder, RelationalGraphEncoder, Decoder, HGNN
-from train_utils import train_step, validate_step, metrics_graph_with_hits, calculate_hits_ranking_based
+from utils.runtime import get_device
+from utils.metrics import metrics_graph_with_hits, calculate_hits_ranking_based
+from utils.training import train_step, validate_step
 
 
 # 设置设备
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 
 
 def train_fold_model(

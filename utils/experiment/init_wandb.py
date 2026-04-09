@@ -13,7 +13,7 @@ def _wandb_enabled(config: Config) -> bool:
     return bool(getattr(config, "use_wandb", False))
 
 
-def _init_wandb_run(config: Config, data_manager, ablation_count: int):
+def init_wandb_run(config: Config, data_manager, ablation_count: int):
     """创建单个wandb run；在同一project内按mode前缀分栏记录。"""
     if not _wandb_enabled(config):
         return None
@@ -49,7 +49,7 @@ def _init_wandb_run(config: Config, data_manager, ablation_count: int):
         run.define_metric(f"{mode_key}/val_epoch", hidden=True)
         run.define_metric(f"{mode_key}/val/*", step_metric=f"{mode_key}/val_epoch")
 
-    run.summary["n_ablations"] = int(ablation_count)
+    # run.summary["n_ablations"] = int(ablation_count)
     run.summary["num_drugs"] = int(len(data_manager.drug_to_idx))
     run.summary["num_genes"] = int(len(data_manager.gene_to_idx))
     run.summary["num_diseases"] = int(len(data_manager.disease_to_idx))

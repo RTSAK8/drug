@@ -1,19 +1,12 @@
-import numpy as np
 import pandas as pd
-import torch
 
 from data_manager import DataManager
+from utils.runtime import set_global_seed
 
 
 def set_seed(seed: int = 42):
     """设置随机种子"""
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    set_global_seed(seed)
 
 
 def prepare_triplets_data(triplets_df: pd.DataFrame, data_manager: DataManager) -> pd.DataFrame:
