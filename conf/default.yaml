@@ -25,6 +25,36 @@ rgcn_use_residual: true
 rgcn_dropout: 0.4
 fusion_method: concat
 
+qccl_temperature: 0.3
+qccl_gene_query_temperature: -1.0
+qccl_drug_query_temperature: -1.0
+qccl_disease_query_temperature: -1.0
+qccl_asymmetric_norm_mode: symmetric
+
+qccl_multi_positive: false
+qccl_hardness_reweight: false
+qccl_hardness_alpha: 1.0
+qccl_hardness_temperature: 1.0
+qccl_query_hardness_reweight: false
+qccl_query_hardness_alpha: 1.0
+qccl_query_hardness_temperature: 1.0
+
+qccl_three_pool_schedule: false
+qccl_pool_easy_quantile: 0.33
+qccl_pool_hard_quantile: 0.66
+qccl_pool_start_weights: [1.25, 1.0, 0.75]
+qccl_pool_end_weights: [0.75, 1.0, 1.25]
+
+qccl_memory_queue: false
+qccl_memory_queue_size: 0
+qccl_memory_queue_warmup_progress: 0.0
+qccl_memory_queue_negatives_per_query: 0
+
+qccl_cond_dim_ratio: 0.5
+qccl_num_layers: 2
+qccl_query_dropout: 0.3
+qccl_film_layer_norm: false
+
 use_wandb: true
 wandb_project: Drug Prediction
 wandb_entity: ""

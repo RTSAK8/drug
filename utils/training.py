@@ -27,6 +27,7 @@ def train_step(
     train_data: np.ndarray,
     train_pos: np.ndarray,
     epoch: int,
+    epoch_progress: float = 0.0,
     alpha: float = 0.4,
 ) -> Dict[str, float]:
     """
@@ -57,6 +58,7 @@ def train_step(
         train_pos_tensor[:, 2],  # pos_diseaseid
         bin_edge_index,
         bin_edge_type,
+        epoch_progress,
     )
 
     # 计算损失
@@ -97,7 +99,8 @@ def validate_step(
     bin_edge_type: torch.Tensor,
     val_data: np.ndarray,
     val_pos: np.ndarray,
-) -> Tuple[float, float, float, Dict]:
+    epoch_progress: float = 1.0,
+) -> Tuple[float, float, float, float, float, Dict]:
     """
     验证步骤
 
@@ -124,6 +127,7 @@ def validate_step(
             val_pos_tensor[:, 2],
             bin_edge_index,
             bin_edge_type,
+            epoch_progress,
         )
 
         # 计算指标

@@ -1,0 +1,37 @@
+defaults:
+  - default
+  - _self_
+
+wandb_name_prefix: qccl_standard
+# 推荐：QCCL v2-standard 最小可复现配置
+# 特点：在 lite 基础上开启三池负样本调度 + query 级难度重加权
+
+alpha: 0.45
+learning_rate: 0.004
+
+qccl_temperature: 0.22
+qccl_gene_query_temperature: -1.0
+qccl_drug_query_temperature: -1.0
+qccl_disease_query_temperature: -1.0
+qccl_asymmetric_norm_mode: symmetric
+
+qccl_multi_positive: true
+qccl_hardness_reweight: true
+qccl_hardness_alpha: 0.7
+qccl_hardness_temperature: 0.7
+qccl_query_hardness_reweight: true
+qccl_query_hardness_alpha: 0.3
+qccl_query_hardness_temperature: 0.8
+
+qccl_three_pool_schedule: true
+qccl_pool_easy_quantile: 0.30
+qccl_pool_hard_quantile: 0.75
+qccl_pool_start_weights: [1.20, 1.00, 0.70]
+qccl_pool_end_weights: [0.90, 1.35, 1.55]
+
+qccl_memory_queue: false
+
+qccl_cond_dim_ratio: 0.5
+qccl_num_layers: 2
+qccl_query_dropout: 0.25
+qccl_film_layer_norm: false

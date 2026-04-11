@@ -12,9 +12,9 @@ class QueryEncoder(nn.Module):
     例如，对于 (drug, ?, disease) 查询，编码drug和disease的嵌入
     """
 
-    def __init__(self, embed_dim: int, cond_dim: int):
+    def __init__(self, embed_dim: int, cond_dim: int, dropout: float = 0.3):
         super(QueryEncoder, self).__init__()
-        self.mlp = nn.Sequential(nn.Linear(2 * embed_dim, embed_dim), nn.ReLU(), nn.Dropout(0.3), nn.Linear(embed_dim, cond_dim))
+        self.mlp = nn.Sequential(nn.Linear(2 * embed_dim, embed_dim), nn.ReLU(), nn.Dropout(dropout), nn.Linear(embed_dim, cond_dim))
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -72,8 +72,20 @@ class MultiLayerFiLMConditionalEntityEncoder(nn.Module):
         nn.init.zeros_(self.proj.bias)
 
     def forward(self, candidate_embs, query_vectors_zq):
-        B, E = candidate_embs.shape
-        h = candidate_embs.unsqueeze(0).expand(B, -1, -1)  # [B,B,E]
+        """
+        Args:
+            candidate_embs: [num_candidates, embed_dim]
+            query_vectors_zq: [num_queries, cond_dim]
+        Returns:
+            [num_queries, num_candidates, cond_dim]
+        """
+        num_queries, _ = query_vectors_zq.shape
+        num_candidates, _ = candidate_embs.shape
+
+        # Expand candidates across query axis and apply per-query FiLM parameters.
+        h = candidate_embs.unsqueeze(0).expand(num_queries, num_candidates, -1)  # [Q,C,E]
+        z_q = query_vectors_zq.unsqueeze(1)  # [Q,1,D]
+
         for layer in self.layers:
-            h = layer(h, query_vectors_zq)
+            h = layer(h, z_q)
         return self.proj(h)  # 投影到查询向量维度
