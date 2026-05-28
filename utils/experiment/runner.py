@@ -4,19 +4,20 @@ import torch
 
 from config import Config
 from data_manager import DataManager
+from utils.runtime import get_device
 
 from .data_prep import set_seed, prepare_triplets_data
-from .init_wandb import _init_wandb_run
+from .init_wandb import init_wandb_run
 from .mode_runner import run_mode_experiment
 
 
 # 设置设备
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 print(f"使用设备: {device}")
 
 
 def run_experiment(config: Config):
-    set_seed(config.random_state)
+    # set_seed(config.random_state)
 
     data_manager = DataManager(config)
 
@@ -54,7 +55,7 @@ def run_experiment(config: Config):
 
     modes = [["gene"], ["disease"]]
 
-    wandb_run = _init_wandb_run(
+    wandb_run = init_wandb_run(
         config=config,
         data_manager=data_manager,
         ablation_count=len(config.graph_ablation_configs),

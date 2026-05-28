@@ -25,3 +25,5 @@ for i in $(seq 1 "$RUN_COUNT"); do
 done
 
 echo "All runs completed."
+
+shutdown -h now

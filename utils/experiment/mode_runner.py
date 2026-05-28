@@ -1,13 +1,9 @@
 import numpy as np
 import torch
 
-from train_utils import (
-    build_hypergraph,
-    build_binary_edges,
-    apply_offsets,
-    generate_negatives_for_fold,
-    save_summary_results,
-)
+from utils.hypergraph import build_hypergraph, build_binary_edges
+from utils.preprocessing import apply_offsets, generate_negatives_for_fold
+from utils.results import save_summary_results
 
 from .training_loop import train_fold_model
 
@@ -72,13 +68,13 @@ def run_mode_experiment(
 
         if wandb_run is not None:
             mode_key = current_mode[0]
-            wandb_run.summary[f"{mode_key}/meta/train_pos_count"] = int(len(train_df))
-            wandb_run.summary[f"{mode_key}/meta/test_pos_count"] = int(len(test_df))
-            wandb_run.summary[f"{mode_key}/meta/train_neg_count"] = int(len(train_neg))
-            wandb_run.summary[f"{mode_key}/meta/test_neg_count"] = int(len(test_neg))
-            wandb_run.summary[f"{mode_key}/meta/train_drug_pool"] = int(len(train_drug_pool))
-            wandb_run.summary[f"{mode_key}/meta/train_gene_pool"] = int(len(train_gene_pool))
-            wandb_run.summary[f"{mode_key}/meta/train_disease_pool"] = int(len(train_disease_pool))
+            wandb_run.summary[f"{mode_key}.meta.train_pos_count"] = int(len(train_df))
+            wandb_run.summary[f"{mode_key}.meta.test_pos_count"] = int(len(test_df))
+            wandb_run.summary[f"{mode_key}.meta.train_neg_count"] = int(len(train_neg))
+            wandb_run.summary[f"{mode_key}.meta.test_neg_count"] = int(len(test_neg))
+            wandb_run.summary[f"{mode_key}.meta.train_drug_pool"] = int(len(train_drug_pool))
+            wandb_run.summary[f"{mode_key}.meta.train_gene_pool"] = int(len(train_gene_pool))
+            wandb_run.summary[f"{mode_key}.meta.train_disease_pool"] = int(len(train_disease_pool))
 
         train_pos_offset = apply_offsets(
             train_df[["Drug_ID", "Gene_ID", "Disease_ID", "Label"]].values.copy(),
@@ -121,10 +117,10 @@ def run_mode_experiment(
 
         if wandb_run is not None:
             mode_key = current_mode[0]
-            wandb_run.summary[f"{mode_key}/meta/hypergraph_train_pos_incidence"] = int(hypergraph_train_pos.shape[1])
-            wandb_run.summary[f"{mode_key}/meta/hypergraph_train_neg_incidence"] = int(hypergraph_train_neg.shape[1])
-            wandb_run.summary[f"{mode_key}/meta/binary_edge_count"] = int(bin_edge_index.shape[1])
-            wandb_run.summary[f"{mode_key}/meta/binary_edge_type_count"] = int(bin_edge_type.shape[0])
+            wandb_run.summary[f"{mode_key}.meta.hypergraph_train_pos_incidence"] = int(hypergraph_train_pos.shape[1])
+            wandb_run.summary[f"{mode_key}.meta.hypergraph_train_neg_incidence"] = int(hypergraph_train_neg.shape[1])
+            wandb_run.summary[f"{mode_key}.meta.boundary_edge_count"] = int(bin_edge_index.shape[1])
+            wandb_run.summary[f"{mode_key}.meta.boundary_edge_type_count"] = int(bin_edge_type.shape[0])
 
         test_metrics = train_fold_model(
             current_mode=current_mode,
@@ -170,14 +166,14 @@ def run_mode_experiment(
 
         if wandb_run is not None:
             mode_key = current_mode[0]
-            wandb_run.summary[f"{mode_key}/test/auc"] = float(test_metrics.get("auc", 0.0))
-            wandb_run.summary[f"{mode_key}/test/aupr"] = float(test_metrics.get("aupr", 0.0))
-            wandb_run.summary[f"{mode_key}/test/f1_score"] = float(test_metrics.get("f1_score", 0.0))
-            wandb_run.summary[f"{mode_key}/test/threshold"] = float(test_metrics.get("threshold", 0.0))
-            wandb_run.summary[f"{mode_key}/test/mrr"] = float(test_metrics.get("mrr", 0.0))
-            wandb_run.summary[f"{mode_key}/test/hit@1"] = float(test_metrics.get("hit@1", 0.0))
-            wandb_run.summary[f"{mode_key}/test/hit@3"] = float(test_metrics.get("hit@3", 0.0))
-            wandb_run.summary[f"{mode_key}/test/hit@5"] = float(test_metrics.get("hit@5", 0.0))
+            wandb_run.summary[f"{mode_key}.test.auc"] = float(test_metrics.get("auc", 0.0))
+            wandb_run.summary[f"{mode_key}.test.aupr"] = float(test_metrics.get("aupr", 0.0))
+            wandb_run.summary[f"{mode_key}.test.f1_score"] = float(test_metrics.get("f1_score", 0.0))
+            wandb_run.summary[f"{mode_key}.test.threshold"] = float(test_metrics.get("threshold", 0.0))
+            wandb_run.summary[f"{mode_key}.test.mrr"] = float(test_metrics.get("mrr", 0.0))
+            wandb_run.summary[f"{mode_key}.test.hit@1"] = float(test_metrics.get("hit@1", 0.0))
+            wandb_run.summary[f"{mode_key}.test.hit@3"] = float(test_metrics.get("hit@3", 0.0))
+            wandb_run.summary[f"{mode_key}.test.hit@5"] = float(test_metrics.get("hit@5", 0.0))
 
         save_summary_results(
             mode=current_mode[0],

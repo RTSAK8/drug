@@ -8,8 +8,9 @@ import torch
 import os
 from typing import Dict, List, Tuple, Optional
 from config import Config
+from utils.runtime import get_device
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 
 
 class DataManager:

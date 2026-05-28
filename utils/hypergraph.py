@@ -5,8 +5,9 @@
 import torch
 import numpy as np
 from typing import List, Tuple, Optional
+from .runtime import get_device
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 
 
 def build_hypergraph(

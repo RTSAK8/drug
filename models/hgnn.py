@@ -2,13 +2,16 @@
 主模型定义
 """
 
+from typing import Any, Dict, Mapping, Optional, Tuple
+
 import torch
 import torch.nn as nn
 
 from .losses import integrate_qccl
 from .query_conditioning import QueryEncoder, MultiLayerFiLMConditionalEntityEncoder
+from utils.runtime import get_device
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 
 
 class HGNN(nn.Module):
@@ -27,6 +30,7 @@ class HGNN(nn.Module):
         loss_type=None,
         binary_graph_encoder: nn.Module = None,
         fusion_method: str = "gate",
+        qccl_config: Optional[Mapping[str, Any]] = None,
     ):
         super(HGNN, self).__init__()
         self.bio_encoder = bio_encoder
@@ -50,12 +54,30 @@ class HGNN(nn.Module):
         # Concat fusion projector (keeps output dim unchanged so Decoder stays the same).
         self.concat_fuse_proj = nn.Linear(out_channels * 2, out_channels)
 
+        # QCCL v2 runtime controls.
+        self.qccl_cfg = self._resolve_qccl_cfg(qccl_config)
+        self.qccl_progress = 0.0
+
+        # Typed memory queues for advanced QCCL negatives.
+        self.register_buffer("_qccl_queue_drug_embs", torch.empty((0, out_channels)), persistent=False)
+        self.register_buffer("_qccl_queue_gene_embs", torch.empty((0, out_channels)), persistent=False)
+        self.register_buffer("_qccl_queue_disease_embs", torch.empty((0, out_channels)), persistent=False)
+        self.register_buffer("_qccl_queue_drug_ids", torch.empty((0,), dtype=torch.long), persistent=False)
+        self.register_buffer("_qccl_queue_gene_ids", torch.empty((0,), dtype=torch.long), persistent=False)
+        self.register_buffer("_qccl_queue_disease_ids", torch.empty((0,), dtype=torch.long), persistent=False)
+
         # 对比学习参数
         if "qccl" in self.loss_type:
             graph_embed_dim = out_channels
-            cond_dim = graph_embed_dim // 2
-            self.query_encoder = QueryEncoder(graph_embed_dim, cond_dim)
-            self.conditional_entity_encoder = MultiLayerFiLMConditionalEntityEncoder(embed_dim=graph_embed_dim, cond_dim=cond_dim, num_layers=2)
+            cond_ratio = float(self.qccl_cfg.get("cond_dim_ratio", 0.5))
+            cond_dim = max(1, int(round(graph_embed_dim * cond_ratio)))
+            self.query_encoder = QueryEncoder(graph_embed_dim, cond_dim, dropout=float(self.qccl_cfg.get("query_dropout", 0.3)))
+            self.conditional_entity_encoder = MultiLayerFiLMConditionalEntityEncoder(
+                embed_dim=graph_embed_dim,
+                cond_dim=cond_dim,
+                num_layers=int(self.qccl_cfg.get("num_layers", 2)),
+                ln=bool(self.qccl_cfg.get("film_layer_norm", False)),
+            )
 
         self.reset_parameters()
 
@@ -78,7 +100,212 @@ class HGNN(nn.Module):
             _reset(self.query_encoder)
             _reset(self.conditional_entity_encoder)
 
-    def forward(self, drug_feature, gene_feature, disease_feature, edge_pos, edge_neg, drug_id, gene_id, disease_id, pos_drugid, pos_geneid, pos_diseaseid, bin_edge_index: torch.Tensor = None, bin_edge_type: torch.Tensor = None):
+    @staticmethod
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @classmethod
+    def _resolve_qccl_cfg(cls, qccl_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        defaults: Dict[str, Any] = {
+            "temperature": 0.3,
+            "gene_query_temperature": None,
+            "drug_query_temperature": None,
+            "disease_query_temperature": None,
+            "norm_mode": "l2",
+            "multi_positive_mode": "group",
+            "suppress_false_negatives": False,
+            "use_hardness_reweight": False,
+            "hardness_alpha": 0.25,
+            "hardness_tau": 0.5,
+            "use_query_hardness_reweight": False,
+            "query_hardness_alpha": 1.0,
+            "query_hardness_tau": 1.0,
+            "enable_three_pool_schedule": False,
+            "pool_schedule_start": 0.35,
+            "pool_schedule_end": 0.7,
+            "pool_schedule_mid_weight": 0.35,
+            "pool_schedule_late_weight": 0.75,
+            "enable_memory_queue": False,
+            "memory_queue_size": 8192,
+            "memory_queue_warmup_steps": 100,
+            "memory_queue_negatives_per_query": 256,
+            "memory_queue_unique_only": True,
+            "cond_dim_ratio": 0.5,
+            "num_layers": 2,
+            "query_dropout": 0.3,
+            "film_layer_norm": False,
+        }
+        cfg = dict(defaults)
+        if qccl_config is not None:
+            for key, value in dict(qccl_config).items():
+                if key in cfg and value is not None:
+                    cfg[key] = value
+
+        cfg["temperature"] = max(1e-6, float(cfg["temperature"]))
+        for key in ("gene_query_temperature", "drug_query_temperature", "disease_query_temperature"):
+            if cfg[key] is not None:
+                cfg[key] = max(1e-6, float(cfg[key]))
+
+        cfg["norm_mode"] = str(cfg["norm_mode"]).lower().strip()
+        if cfg["norm_mode"] not in {"l2", "symmetric", "query_only", "candidate_only", "none"}:
+            cfg["norm_mode"] = "l2"
+
+        cfg["multi_positive_mode"] = str(cfg["multi_positive_mode"]).lower().strip()
+        if cfg["multi_positive_mode"] not in {"group", "strict"}:
+            cfg["multi_positive_mode"] = "group"
+
+        for key in (
+            "suppress_false_negatives",
+            "use_hardness_reweight",
+            "use_query_hardness_reweight",
+            "enable_three_pool_schedule",
+            "enable_memory_queue",
+            "memory_queue_unique_only",
+            "film_layer_norm",
+        ):
+            cfg[key] = cls._to_bool(cfg[key])
+
+        cfg["hardness_alpha"] = max(0.0, float(cfg["hardness_alpha"]))
+        cfg["hardness_tau"] = max(1e-6, float(cfg["hardness_tau"]))
+        cfg["query_hardness_alpha"] = max(0.0, float(cfg["query_hardness_alpha"]))
+        cfg["query_hardness_tau"] = max(1e-6, float(cfg["query_hardness_tau"]))
+        cfg["pool_schedule_start"] = min(1.0, max(0.0, float(cfg["pool_schedule_start"])))
+        cfg["pool_schedule_end"] = min(1.0, max(0.0, float(cfg["pool_schedule_end"])))
+        if cfg["pool_schedule_end"] < cfg["pool_schedule_start"]:
+            cfg["pool_schedule_start"], cfg["pool_schedule_end"] = cfg["pool_schedule_end"], cfg["pool_schedule_start"]
+        cfg["pool_schedule_mid_weight"] = min(1.0, max(0.0, float(cfg["pool_schedule_mid_weight"])))
+        cfg["pool_schedule_late_weight"] = min(1.0, max(0.0, float(cfg["pool_schedule_late_weight"])))
+
+        cfg["memory_queue_size"] = max(0, int(cfg["memory_queue_size"]))
+        cfg["memory_queue_warmup_steps"] = max(0, int(cfg["memory_queue_warmup_steps"]))
+        cfg["memory_queue_negatives_per_query"] = max(0, int(cfg["memory_queue_negatives_per_query"]))
+
+        cfg["cond_dim_ratio"] = max(0.05, float(cfg["cond_dim_ratio"]))
+        cfg["num_layers"] = max(1, int(cfg["num_layers"]))
+        cfg["query_dropout"] = min(1.0, max(0.0, float(cfg["query_dropout"])))
+        return cfg
+
+    def set_qccl_progress(self, epoch_progress: Optional[float]) -> None:
+        if epoch_progress is None:
+            return
+        try:
+            value = float(epoch_progress)
+        except (TypeError, ValueError):
+            return
+        self.qccl_progress = min(1.0, max(0.0, value))
+
+    def _resolve_query_temperature(self, query_type: str) -> float:
+        if query_type == "gene":
+            value = self.qccl_cfg.get("gene_query_temperature")
+        elif query_type == "drug":
+            value = self.qccl_cfg.get("drug_query_temperature")
+        elif query_type == "disease":
+            value = self.qccl_cfg.get("disease_query_temperature")
+        else:
+            value = None
+        if value is None:
+            value = self.qccl_cfg.get("temperature", 0.3)
+        return max(1e-6, float(value))
+
+    @staticmethod
+    def _queue_buffer_names(query_type: str) -> Tuple[str, str]:
+        if query_type == "drug":
+            return "_qccl_queue_drug_ids", "_qccl_queue_drug_embs"
+        if query_type == "gene":
+            return "_qccl_queue_gene_ids", "_qccl_queue_gene_embs"
+        if query_type == "disease":
+            return "_qccl_queue_disease_ids", "_qccl_queue_disease_embs"
+        raise ValueError(f"Unknown query_type for queue: {query_type}")
+
+    def get_qccl_queue(self, query_type: str):
+        if not self.qccl_cfg.get("enable_memory_queue", False):
+            return None, None
+
+        ids_name, emb_name = self._queue_buffer_names(query_type)
+        queue_ids = getattr(self, ids_name)
+        queue_embs = getattr(self, emb_name)
+
+        if queue_ids.numel() == 0 or queue_embs.numel() == 0:
+            return None, None
+
+        warmup_steps = int(self.qccl_cfg.get("memory_queue_warmup_steps", 0))
+        if warmup_steps > 0 and queue_ids.size(0) < warmup_steps:
+            return None, None
+
+        negatives_per_query = int(self.qccl_cfg.get("memory_queue_negatives_per_query", 0))
+        if negatives_per_query > 0 and queue_ids.size(0) > negatives_per_query:
+            sampled = torch.randperm(queue_ids.size(0), device=queue_ids.device)[:negatives_per_query]
+            queue_ids = queue_ids.index_select(0, sampled)
+            queue_embs = queue_embs.index_select(0, sampled)
+
+        return queue_ids, queue_embs
+
+    def update_qccl_queue(self, query_type: str, new_ids: torch.Tensor, new_embeddings: torch.Tensor) -> None:
+        if not self.qccl_cfg.get("enable_memory_queue", False):
+            return
+        if new_ids is None or new_embeddings is None:
+            return
+
+        if not isinstance(new_ids, torch.Tensor):
+            new_ids = torch.as_tensor(new_ids, dtype=torch.long, device=new_embeddings.device)
+        else:
+            new_ids = new_ids.to(dtype=torch.long, device=new_embeddings.device)
+
+        new_ids = new_ids.reshape(-1)
+        if new_ids.numel() == 0:
+            return
+
+        new_embeddings = new_embeddings.reshape(new_ids.numel(), -1)
+
+        ids_name, emb_name = self._queue_buffer_names(query_type)
+        old_ids = getattr(self, ids_name).to(new_ids.device)
+        old_embs = getattr(self, emb_name).to(new_embeddings.device)
+
+        merged_ids = torch.cat([old_ids, new_ids], dim=0)
+        merged_embs = torch.cat([old_embs, new_embeddings], dim=0)
+
+        if self.qccl_cfg.get("memory_queue_unique_only", True):
+            seen = set()
+            keep_indices_rev = []
+            for i in range(merged_ids.size(0) - 1, -1, -1):
+                entity_id = int(merged_ids[i].item())
+                if entity_id in seen:
+                    continue
+                seen.add(entity_id)
+                keep_indices_rev.append(i)
+            keep_indices = torch.tensor(list(reversed(keep_indices_rev)), device=merged_ids.device, dtype=torch.long)
+            merged_ids = merged_ids.index_select(0, keep_indices)
+            merged_embs = merged_embs.index_select(0, keep_indices)
+
+        max_queue_size = int(self.qccl_cfg.get("memory_queue_size", 0))
+        if max_queue_size > 0 and merged_ids.size(0) > max_queue_size:
+            merged_ids = merged_ids[-max_queue_size:]
+            merged_embs = merged_embs[-max_queue_size:]
+
+        setattr(self, ids_name, merged_ids.detach())
+        setattr(self, emb_name, merged_embs.detach())
+
+    def forward(
+        self,
+        drug_feature,
+        gene_feature,
+        disease_feature,
+        edge_pos,
+        edge_neg,
+        drug_id,
+        gene_id,
+        disease_id,
+        pos_drugid,
+        pos_geneid,
+        pos_diseaseid,
+        bin_edge_index: torch.Tensor = None,
+        bin_edge_type: torch.Tensor = None,
+        epoch_progress: Optional[float] = None,
+    ):
         """
         前向传播
 
@@ -91,6 +318,8 @@ class HGNN(nn.Module):
             drug_id, gene_id, disease_id: 查询三元组的ID
             pos_drugid, pos_geneid, pos_diseaseid: 正样本三元组的ID
         """
+        self.set_qccl_progress(epoch_progress)
+
         # 1. 编码生物特征
         x_drug, x_gene, x_disease = self.bio_encoder(drug_feature, gene_feature, disease_feature)
         embed = torch.cat([x_drug, x_gene, x_disease], dim=0)
@@ -120,20 +349,67 @@ class HGNN(nn.Module):
         res = self.decoder(graph_embed_pos, drug_id, gene_id, disease_id)
 
         # 4. 计算对比学习损失
-        CL_loss = torch.tensor(0.0, device=device)
+        CL_loss = torch.tensor(0.0, device=graph_embed_pos.device)
         if "qccl" in self.loss_type and len(pos_drugid) > 0:
 
-            def qccl_loss_for(query_head_ids, query_tail_ids, answer_ids):
-                return integrate_qccl(self, query_head_ids, query_tail_ids, answer_ids, entity_embeddings=graph_embed_pos, temperature=0.3)
+            def _to_id_tensor(values):
+                if isinstance(values, torch.Tensor):
+                    return values.to(device=graph_embed_pos.device, dtype=torch.long)
+                return torch.tensor(values, device=graph_embed_pos.device, dtype=torch.long)
+
+            norm_mode = self.qccl_cfg.get("norm_mode", "l2")
+            multi_positive_mode = self.qccl_cfg.get("multi_positive_mode", "group")
+
+            def qccl_loss_for(query_head_ids, query_tail_ids, answer_ids, query_type: str):
+                query_head_ids = _to_id_tensor(query_head_ids)
+                query_tail_ids = _to_id_tensor(query_tail_ids)
+                answer_ids = _to_id_tensor(answer_ids)
+
+                queue_ids, queue_embeddings = self.get_qccl_queue(query_type)
+                loss = integrate_qccl(
+                    self,
+                    query_head_ids,
+                    query_tail_ids,
+                    answer_ids,
+                    entity_embeddings=graph_embed_pos,
+                    temperature=self._resolve_query_temperature(query_type),
+                    query_type=query_type,
+                    progress=self.qccl_progress,
+                    queue_ids=queue_ids,
+                    queue_embeddings=queue_embeddings,
+                    norm_mode=norm_mode,
+                    multi_positive_mode=multi_positive_mode,
+                    suppress_false_negatives=bool(self.qccl_cfg.get("suppress_false_negatives", False)),
+                    use_hardness_reweight=bool(self.qccl_cfg.get("use_hardness_reweight", False)),
+                    hardness_alpha=float(self.qccl_cfg.get("hardness_alpha", 0.25)),
+                    hardness_tau=float(self.qccl_cfg.get("hardness_tau", 0.5)),
+                    use_query_hardness_reweight=bool(self.qccl_cfg.get("use_query_hardness_reweight", False)),
+                    query_hardness_alpha=float(self.qccl_cfg.get("query_hardness_alpha", 1.0)),
+                    query_hardness_tau=float(self.qccl_cfg.get("query_hardness_tau", 1.0)),
+                    enable_three_pool_schedule=bool(self.qccl_cfg.get("enable_three_pool_schedule", False)),
+                    pool_schedule_start=float(self.qccl_cfg.get("pool_schedule_start", 0.35)),
+                    pool_schedule_end=float(self.qccl_cfg.get("pool_schedule_end", 0.7)),
+                    pool_schedule_mid_weight=float(self.qccl_cfg.get("pool_schedule_mid_weight", 0.35)),
+                    pool_schedule_late_weight=float(self.qccl_cfg.get("pool_schedule_late_weight", 0.75)),
+                )
+
+                if self.training:
+                    valid_mask = (answer_ids >= 0) & (answer_ids < graph_embed_pos.size(0))
+                    if valid_mask.any():
+                        valid_answer_ids = answer_ids[valid_mask]
+                        valid_answer_embeddings = graph_embed_pos[valid_answer_ids].detach()
+                        self.update_qccl_queue(query_type, valid_answer_ids, valid_answer_embeddings)
+
+                return loss
 
             # 三类查询
-            loss_gene = qccl_loss_for(pos_drugid, pos_diseaseid, pos_geneid)
-            loss_drug = qccl_loss_for(pos_geneid, pos_diseaseid, pos_drugid)
-            loss_disease = qccl_loss_for(pos_drugid, pos_geneid, pos_diseaseid)
+            loss_gene = qccl_loss_for(pos_drugid, pos_diseaseid, pos_geneid, query_type="gene")
+            loss_drug = qccl_loss_for(pos_geneid, pos_diseaseid, pos_drugid, query_type="drug")
+            loss_disease = qccl_loss_for(pos_drugid, pos_geneid, pos_diseaseid, query_type="disease")
             CL_loss = (loss_gene + loss_drug + loss_disease) / 3
 
         # 5. 计算排名指标
-        mrr = torch.tensor(0.0, device=device)
+        mrr = torch.tensor(0.0, device=graph_embed_pos.device)
         all_ranks = []
 
         if self.replace_dims and len(pos_drugid) > 0 and pos_geneid is not None and pos_diseaseid is not None:

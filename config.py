@@ -50,6 +50,43 @@ class Config:
     # 分支融合方式：gate(按比例加和) | concat(拼接后投影)
     fusion_method: str = "concat"
 
+    # QCCL基础配置
+    qccl_temperature: float = 0.3
+    # <=0 时回退到 qccl_temperature
+    qccl_gene_query_temperature: float = -1.0
+    qccl_drug_query_temperature: float = -1.0
+    qccl_disease_query_temperature: float = -1.0
+    # symmetric | query_only | candidate_only | none
+    qccl_asymmetric_norm_mode: str = "symmetric"
+
+    # QCCL v2-lite: multi-positive 去假负 + hardness重加权
+    qccl_multi_positive: bool = False
+    qccl_hardness_reweight: bool = False
+    qccl_hardness_alpha: float = 1.0
+    qccl_hardness_temperature: float = 1.0
+    qccl_query_hardness_reweight: bool = False
+    qccl_query_hardness_alpha: float = 1.0
+    qccl_query_hardness_temperature: float = 1.0
+
+    # QCCL v2-standard: 三池负样本调度
+    qccl_three_pool_schedule: bool = False
+    qccl_pool_easy_quantile: float = 0.33
+    qccl_pool_hard_quantile: float = 0.66
+    qccl_pool_start_weights: List[float] = field(default_factory=lambda: [1.25, 1.0, 0.75])
+    qccl_pool_end_weights: List[float] = field(default_factory=lambda: [0.75, 1.0, 1.25])
+
+    # QCCL v2-advanced: memory queue
+    qccl_memory_queue: bool = False
+    qccl_memory_queue_size: int = 0
+    qccl_memory_queue_warmup_progress: float = 0.0
+    qccl_memory_queue_negatives_per_query: int = 0
+
+    # QCCL模块结构（方便消融）
+    qccl_cond_dim_ratio: float = 0.5
+    qccl_num_layers: int = 2
+    qccl_query_dropout: float = 0.3
+    qccl_film_layer_norm: bool = False
+
     # wandb配置
     use_wandb: bool = True
     wandb_project: str = "Drug Effect Prediction"

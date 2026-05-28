@@ -6,11 +6,13 @@ import torch.nn as nn
 
 from config import Config
 from models import BioEncoder, HgnnEncoder, RelationalGraphEncoder, Decoder, HGNN
-from train_utils import train_step, validate_step, metrics_graph_with_hits, calculate_hits_ranking_based
+from utils.runtime import get_device
+from utils.metrics import metrics_graph_with_hits, calculate_hits_ranking_based
+from utils.training import train_step, validate_step
 
 
 # 设置设备
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 
 
 def train_fold_model(
@@ -60,6 +62,43 @@ def train_fold_model(
     decoder_input_dim = (config.hidden_dim // 4) * 3
     decoder = Decoder(decoder_input_dim)
 
+    pool_start_weights = getattr(config, "qccl_pool_start_weights", [1.0, 1.0, 1.0])
+    pool_end_weights = getattr(config, "qccl_pool_end_weights", [1.0, 1.0, 1.0])
+    start_mid_weight = float(pool_start_weights[1]) if isinstance(pool_start_weights, (list, tuple)) and len(pool_start_weights) > 1 else 1.0
+    end_mid_weight = float(pool_end_weights[1]) if isinstance(pool_end_weights, (list, tuple)) and len(pool_end_weights) > 1 else 1.0
+    start_late_weight = float(pool_start_weights[2]) if isinstance(pool_start_weights, (list, tuple)) and len(pool_start_weights) > 2 else 1.0
+    end_late_weight = float(pool_end_weights[2]) if isinstance(pool_end_weights, (list, tuple)) and len(pool_end_weights) > 2 else 1.0
+
+    qccl_config = {
+        "temperature": float(getattr(config, "qccl_temperature", 0.3)),
+        "gene_query_temperature": None if float(getattr(config, "qccl_gene_query_temperature", -1.0)) <= 0 else float(getattr(config, "qccl_gene_query_temperature", -1.0)),
+        "drug_query_temperature": None if float(getattr(config, "qccl_drug_query_temperature", -1.0)) <= 0 else float(getattr(config, "qccl_drug_query_temperature", -1.0)),
+        "disease_query_temperature": None if float(getattr(config, "qccl_disease_query_temperature", -1.0)) <= 0 else float(getattr(config, "qccl_disease_query_temperature", -1.0)),
+        "norm_mode": str(getattr(config, "qccl_asymmetric_norm_mode", "symmetric")),
+        "multi_positive_mode": "group" if bool(getattr(config, "qccl_multi_positive", False)) else "strict",
+        "suppress_false_negatives": bool(getattr(config, "qccl_multi_positive", False)),
+        "use_hardness_reweight": bool(getattr(config, "qccl_hardness_reweight", False)),
+        "hardness_alpha": float(getattr(config, "qccl_hardness_alpha", 1.0)),
+        "hardness_tau": float(getattr(config, "qccl_hardness_temperature", 1.0)),
+        "use_query_hardness_reweight": bool(getattr(config, "qccl_query_hardness_reweight", False)),
+        "query_hardness_alpha": float(getattr(config, "qccl_query_hardness_alpha", 1.0)),
+        "query_hardness_tau": float(getattr(config, "qccl_query_hardness_temperature", 1.0)),
+        "enable_three_pool_schedule": bool(getattr(config, "qccl_three_pool_schedule", False)),
+        "pool_schedule_start": float(getattr(config, "qccl_pool_easy_quantile", 0.33)),
+        "pool_schedule_end": float(getattr(config, "qccl_pool_hard_quantile", 0.66)),
+        "pool_schedule_mid_weight": max(0.0, end_mid_weight - start_mid_weight),
+        "pool_schedule_late_weight": max(0.0, end_late_weight - start_late_weight),
+        "enable_memory_queue": bool(getattr(config, "qccl_memory_queue", False)),
+        "memory_queue_size": int(getattr(config, "qccl_memory_queue_size", 0)),
+        "memory_queue_warmup_steps": int(round(max(0.0, min(1.0, float(getattr(config, "qccl_memory_queue_warmup_progress", 0.0)))) * max(1, int(config.epochs)))),
+        "memory_queue_negatives_per_query": int(getattr(config, "qccl_memory_queue_negatives_per_query", 0)),
+        "memory_queue_unique_only": True,
+        "cond_dim_ratio": float(getattr(config, "qccl_cond_dim_ratio", 0.5)),
+        "num_layers": int(getattr(config, "qccl_num_layers", 2)),
+        "query_dropout": float(getattr(config, "qccl_query_dropout", 0.3)),
+        "film_layer_norm": bool(getattr(config, "qccl_film_layer_norm", False)),
+    }
+
     model = HGNN(
         bio_encoder=bio_encoder,
         graph_encoder=graph_encoder,
@@ -69,6 +108,7 @@ def train_fold_model(
         replace_dims=current_mode,
         loss_type=config.loss_type,
         fusion_method=getattr(config, "fusion_method", "gate"),
+        qccl_config=qccl_config,
     ).to(device)
 
     criterion = nn.BCELoss()
@@ -79,6 +119,7 @@ def train_fold_model(
 
     for epoch in range(config.epochs):
         global_step = mode_index * (total_ablations * config.epochs) + ablation_index * config.epochs + epoch + 1
+        epoch_progress = float(epoch) / float(max(config.epochs - 1, 1))
 
         train_metrics = train_step(
             model=model,
@@ -94,6 +135,7 @@ def train_fold_model(
             train_data=train_data,
             train_pos=train_pos,
             epoch=epoch,
+            epoch_progress=epoch_progress,
             alpha=config.alpha,
         )
 
@@ -126,6 +168,7 @@ def train_fold_model(
                 bin_edge_type=bin_edge_type,
                 val_data=val_data,
                 val_pos=val_pos,
+                epoch_progress=epoch_progress,
             )
 
             print(f"Epoch {epoch+1:03d} | Val: AUC={auc:.4f}, AUPR={aupr:.4f}, " f"F1={f1_score:.4f}, thresh={threshold:.4f}, ")
@@ -171,6 +214,7 @@ def train_fold_model(
             val_pos_tensor[:, 2],
             bin_edge_index,
             bin_edge_type,
+            1.0,
         )
 
         y_true = val_data[:, 3]
