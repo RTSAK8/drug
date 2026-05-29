@@ -12,7 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 @dataclass
 class Config:
     """实验配置类"""
-
+    
     # 训练参数
     epochs: int = 1000
     learning_rate: float = 0.005
@@ -24,6 +24,9 @@ class Config:
     data_dir: str = "./dataset"
     neg_ratio: int = 3
     max_attempts: int = 50
+    report_overlap_stats: bool = True
+    drop_test_overlap_with_train: bool = False
+
     # 交叉验证参数
     n_splits: int = 5
     random_state: int = 42

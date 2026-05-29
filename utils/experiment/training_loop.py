@@ -197,6 +197,36 @@ def train_fold_model(
         model.load_state_dict(torch.load(model_path, map_location=device))
 
     with torch.no_grad():
+        threshold_source = "eval_best_f1"
+        calibrated_threshold = None
+
+        if not use_checkpoint:
+            # 独立测试模式下，阈值仅用训练集校准，避免在test上选阈值产生乐观偏差
+            train_data_tensor = torch.from_numpy(train_data).long().to(device)
+            train_pos_tensor = torch.from_numpy(train_pos).long().to(device)
+
+            train_pred, _, _, _ = model(
+                drug_fea,
+                gene_fea,
+                disease_fea,
+                hypergraph_pos,
+                hypergraph_neg,
+                train_data_tensor[:, 0],
+                train_data_tensor[:, 1],
+                train_data_tensor[:, 2],
+                train_pos_tensor[:, 0],
+                train_pos_tensor[:, 1],
+                train_pos_tensor[:, 2],
+                bin_edge_index,
+                bin_edge_type,
+                1.0,
+            )
+
+            train_y_true = train_data[:, 3]
+            train_y_pred = train_pred.cpu().numpy()
+            _, _, _, calibrated_threshold, _ = metrics_graph_with_hits(train_y_true, train_y_pred)
+            threshold_source = "train_best_f1"
+
         val_data_tensor = torch.from_numpy(val_data).long().to(device)
         val_pos_tensor = torch.from_numpy(val_pos).long().to(device)
 
@@ -220,7 +250,7 @@ def train_fold_model(
         y_true = val_data[:, 3]
         y_pred = pred.cpu().numpy()
 
-        auc, aupr, best_f1_score, threshold, _ = metrics_graph_with_hits(y_true, y_pred)
+        auc, aupr, best_f1_score, threshold, _ = metrics_graph_with_hits(y_true, y_pred, fixed_threshold=calibrated_threshold)
         rank_hits = calculate_hits_ranking_based(ranks, [1, 3, 5])
 
         final_metrics = {
@@ -233,6 +263,8 @@ def train_fold_model(
             "hit@3": float(rank_hits["hit@3"]),
             "hit@5": float(rank_hits["hit@5"]),
         }
+
+        print(f"  threshold_source: {threshold_source}")
 
         print(f"\n最终测试结果:")
         for metric, value in final_metrics.items():

@@ -18,7 +18,7 @@ print(f"使用设备: {device}")
 
 def run_experiment(config: Config):
     # set_seed(config.random_state)
-
+    # 1. prepare data
     data_manager = DataManager(config)
 
     print("=" * 60)
@@ -36,6 +36,22 @@ def run_experiment(config: Config):
     print("准备三元组数据...")
     train_triplets_df = prepare_triplets_data(data["triplets"], data_manager)
     test_triplets_df = prepare_triplets_data(data.get("drugbank_triplets", pd.DataFrame()), data_manager)
+
+    if not train_triplets_df.empty and not test_triplets_df.empty:
+        train_keys = set(tuple(x) for x in train_triplets_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values)
+        test_keys = set(tuple(x) for x in test_triplets_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values)
+        overlap = train_keys & test_keys
+
+        if bool(getattr(config, "report_overlap_stats", True)):
+            ratio = (len(overlap) / max(len(test_keys), 1)) * 100.0
+            print(f"训练/测试三元组重叠: {len(overlap)} / {len(test_keys)} ({ratio:.2f}%)")
+
+        if overlap and bool(getattr(config, "drop_test_overlap_with_train", False)):
+            overlap_mask = test_triplets_df[["Drug_ID", "Gene_ID", "Disease_ID"]].apply(tuple, axis=1).isin(overlap)
+            before = len(test_triplets_df)
+            test_triplets_df = test_triplets_df.loc[~overlap_mask].reset_index(drop=True)
+            after = len(test_triplets_df)
+            print(f"已剔除测试集中与训练重叠的三元组: {before - after} 条，剩余 {after} 条")
 
     if test_triplets_df.empty:
         print("警告: drugbank_triplets 为空，将无法进行独立测试评估")
@@ -55,6 +71,7 @@ def run_experiment(config: Config):
 
     modes = [["gene"], ["disease"]]
 
+    # 2. init wandb
     wandb_run = init_wandb_run(
         config=config,
         data_manager=data_manager,
@@ -62,6 +79,7 @@ def run_experiment(config: Config):
     )
     try:
         for mode_index, current_mode in enumerate(modes):
+            # 3. run mode experiment
             run_mode_experiment(
                 current_mode=current_mode,
                 mode_index=mode_index,

@@ -4,7 +4,7 @@
 
 import numpy as np
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 def calculate_hits_ranking_based(ranks: List[int], k_list: List[int] = [1, 3, 5]) -> Dict[str, float]:
@@ -31,7 +31,25 @@ def calculate_hits_ranking_based(ranks: List[int], k_list: List[int] = [1, 3, 5]
     return hits
 
 
-def metrics_graph_with_hits(y_true: np.ndarray, y_pred: np.ndarray, k_list: List[int] = [1, 3, 5]) -> Tuple[float, float, float, Dict[str, float]]:
+def compute_f1_from_threshold(y_true: np.ndarray, y_pred: np.ndarray, threshold: float) -> float:
+    """在给定阈值下计算F1，避免在测试集上二次寻优阈值。"""
+    y_true = np.asarray(y_true).astype(np.int32)
+    y_pred = np.asarray(y_pred)
+    y_hat = (y_pred >= float(threshold)).astype(np.int32)
+
+    tp = int(np.sum((y_hat == 1) & (y_true == 1)))
+    fp = int(np.sum((y_hat == 1) & (y_true == 0)))
+    fn = int(np.sum((y_hat == 0) & (y_true == 1)))
+
+    return float((2.0 * tp) / (2.0 * tp + fp + fn + 1e-10))
+
+
+def metrics_graph_with_hits(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    k_list: List[int] = [1, 3, 5],
+    fixed_threshold: Optional[float] = None,
+) -> Tuple[float, float, float, float, Dict[str, float]]:
     """
     计算二分类指标和Hit@K指标
 
@@ -41,7 +59,7 @@ def metrics_graph_with_hits(y_true: np.ndarray, y_pred: np.ndarray, k_list: List
         k_list: Hit@K的K值列表
 
     Returns:
-        auc, aupr, f1_score, hits字典
+        auc, aupr, f1_score, threshold, hits字典
     """
     # 计算AUC
     auc_score = roc_auc_score(y_true, y_pred)
@@ -50,18 +68,22 @@ def metrics_graph_with_hits(y_true: np.ndarray, y_pred: np.ndarray, k_list: List
     precision, recall, thresholds = precision_recall_curve(y_true, y_pred)
     aupr_score = auc(recall, precision)
 
-    # 计算最佳阈值下的F1 score
-    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
-    f1_scores = f1_scores[:-1]  # 移除最后一个值（对应无预测的情况）
+    if fixed_threshold is None:
+        # 计算最佳阈值下的F1 score
+        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
+        f1_scores = f1_scores[:-1]  # 移除最后一个值（对应无预测的情况）
 
-    if len(f1_scores) > 0:
-        best_threshold_idx = np.argmax(f1_scores)
-        best_f1_score = f1_scores[best_threshold_idx]
-        best_threshold = thresholds[best_threshold_idx]
+        if len(f1_scores) > 0:
+            best_threshold_idx = np.argmax(f1_scores)
+            best_f1_score = float(f1_scores[best_threshold_idx])
+            best_threshold = float(thresholds[best_threshold_idx])
+        else:
+            best_f1_score = 0.0
+            best_threshold = 0.5
     else:
-        best_f1_score = 0.0
-        best_threshold = 0.5
-    best_threshold = float(best_threshold)
+        best_threshold = float(fixed_threshold)
+        best_f1_score = compute_f1_from_threshold(y_true, y_pred, best_threshold)
+
     # 计算Hit@K 待review
     hits = calculate_hits_binary_classification(y_true, y_pred, k_list)
 
