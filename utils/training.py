@@ -29,6 +29,9 @@ def train_step(
     epoch: int,
     epoch_progress: float = 0.0,
     alpha: float = 0.4,
+    bce_weight: float = 0.3,
+    qfal_weight: float = 0.5,
+    qccl_weight: float = 0.2,
 ) -> Dict[str, float]:
     """
     单步训练函数
@@ -44,7 +47,7 @@ def train_step(
     train_pos_tensor = torch.from_numpy(train_pos).long().to(device)
 
     # 前向传播
-    pred, cl_loss, mrr, ranks = model(
+    pred_logits, cl_loss, qfal_loss, mrr, ranks = model(
         drug_emb,
         gene_emb,
         disease_emb,
@@ -63,8 +66,13 @@ def train_step(
 
     # 计算损失
     target = torch.from_numpy(train_data[:, 3]).float().to(device)
-    main_loss = loss_func(pred, target)
-    total_loss = (1 - alpha) * main_loss + alpha * cl_loss
+    main_loss = loss_func(pred_logits, target)
+
+    if "qfal" in getattr(model, "loss_type", []):
+        total_loss = bce_weight * main_loss + qfal_weight * qfal_loss + qccl_weight * cl_loss
+    else:
+        # 兼容原始 BCE + QCCL 训练方式。
+        total_loss = (1 - alpha) * main_loss + alpha * cl_loss
 
     # 反向传播
     total_loss.backward()
@@ -75,12 +83,23 @@ def train_step(
 
     # 打印训练信息
     if epoch % 10 == 0:
-        print(f"Epoch {epoch+1:03d}: Loss={total_loss.item():.4f}, " f"Main={main_loss.item():.4f}, CL={cl_loss.item():.4f}, " f'MRR={mrr:.4f}, Hit@1={hits["hit@1"]:.4f}, ' f'Hit@3={hits["hit@3"]:.4f}, Hit@5={hits["hit@5"]:.4f}')
+        print(
+            f"Epoch {epoch+1:03d}: "
+            f"Loss={total_loss.item():.4f}, "
+            f"BCE={main_loss.item():.4f}, "
+            f"QCCL={cl_loss.item():.4f}, "
+            f"QFAL={qfal_loss.item():.4f}, "
+            f"MRR={mrr:.4f}, "
+            f'Hit@1={hits["hit@1"]:.4f}, '
+            f'Hit@3={hits["hit@3"]:.4f}, '
+            f'Hit@5={hits["hit@5"]:.4f}'
+        )
 
     return {
         "loss": float(total_loss.item()),
         "main_loss": float(main_loss.item()),
         "cl_loss": float(cl_loss.item()),
+        "qfal_loss": float(qfal_loss.item()),
         "mrr": float(mrr),
         "hit@1": float(hits["hit@1"]),
         "hit@3": float(hits["hit@3"]),
@@ -113,7 +132,7 @@ def validate_step(
         val_pos_tensor = torch.from_numpy(val_pos).long().to(device)
 
         # 前向传播
-        pred, cl_loss, mrr, ranks = model(
+        pred_logits, cl_loss, qfal_loss, mrr, ranks = model(
             drug_emb,
             gene_emb,
             disease_emb,
@@ -132,7 +151,7 @@ def validate_step(
 
         # 计算指标
         y_true = val_data[:, 3]
-        y_pred = pred.cpu().numpy()
+        y_pred = torch.sigmoid(pred_logits).cpu().numpy()
 
         auc_score, aupr_score, f1_score, threshold, hits = metrics_graph_with_hits(y_true, y_pred)
 

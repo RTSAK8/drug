@@ -99,6 +99,16 @@ def train_fold_model(
         "film_layer_norm": bool(getattr(config, "qccl_film_layer_norm", False)),
     }
 
+    qfal_config = {
+        "num_negatives": int(getattr(config, "qfal_num_negatives", 64)),
+        "temperature": float(getattr(config, "qfal_temperature", 0.2)),
+        "false_negative_weight": float(getattr(config, "qfal_false_negative_weight", 0.05)),
+        "known_positive_masking": bool(getattr(config, "qfal_known_positive_masking", True)),
+        "self_adversarial": bool(getattr(config, "qfal_self_adversarial", True)),
+        "adversarial_temperature": float(getattr(config, "qfal_adversarial_temperature", 1.0)),
+        "max_queries": int(getattr(config, "qfal_max_queries", 2048)),
+    }
+
     model = HGNN(
         bio_encoder=bio_encoder,
         graph_encoder=graph_encoder,
@@ -109,9 +119,10 @@ def train_fold_model(
         loss_type=config.loss_type,
         fusion_method=getattr(config, "fusion_method", "gate"),
         qccl_config=qccl_config,
+        qfal_config=qfal_config,
     ).to(device)
 
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.L2)
 
     best_mrr = 0
@@ -137,6 +148,9 @@ def train_fold_model(
             epoch=epoch,
             epoch_progress=epoch_progress,
             alpha=config.alpha,
+            bce_weight=float(getattr(config, "bce_weight", 0.3)),
+            qfal_weight=float(getattr(config, "qfal_weight", 0.5)),
+            qccl_weight=float(getattr(config, "qccl_weight", 0.2)),
         )
 
         if wandb_run is not None:
@@ -146,6 +160,7 @@ def train_fold_model(
                     f"{mode_key}/train_total_loss": float(train_metrics["loss"]),
                     f"{mode_key}/train_main_loss": float(train_metrics["main_loss"]),
                     f"{mode_key}/train_cl_loss": float(train_metrics["cl_loss"]),
+                    f"{mode_key}/train_qfal_loss": float(train_metrics.get("qfal_loss", 0.0)),
                     f"{mode_key}/train_mrr": float(train_metrics["mrr"]),
                     f"{mode_key}/train_hit@1": float(train_metrics["hit@1"]),
                     f"{mode_key}/train_hit@3": float(train_metrics["hit@3"]),
@@ -205,7 +220,7 @@ def train_fold_model(
             train_data_tensor = torch.from_numpy(train_data).long().to(device)
             train_pos_tensor = torch.from_numpy(train_pos).long().to(device)
 
-            train_pred, _, _, _ = model(
+            train_logits, _, _, _, _ = model(
                 drug_fea,
                 gene_fea,
                 disease_fea,
@@ -223,14 +238,14 @@ def train_fold_model(
             )
 
             train_y_true = train_data[:, 3]
-            train_y_pred = train_pred.cpu().numpy()
+            train_y_pred = torch.sigmoid(train_logits).cpu().numpy()
             _, _, _, calibrated_threshold, _ = metrics_graph_with_hits(train_y_true, train_y_pred)
             threshold_source = "train_best_f1"
 
         val_data_tensor = torch.from_numpy(val_data).long().to(device)
         val_pos_tensor = torch.from_numpy(val_pos).long().to(device)
 
-        pred, _, mrr, ranks = model(
+        pred_logits, _, _, mrr, ranks = model(
             drug_fea,
             gene_fea,
             disease_fea,
@@ -248,7 +263,7 @@ def train_fold_model(
         )
 
         y_true = val_data[:, 3]
-        y_pred = pred.cpu().numpy()
+        y_pred = torch.sigmoid(pred_logits).cpu().numpy()
 
         auc, aupr, best_f1_score, threshold, _ = metrics_graph_with_hits(y_true, y_pred, fixed_threshold=calibrated_threshold)
         rank_hits = calculate_hits_ranking_based(ranks, [1, 3, 5])

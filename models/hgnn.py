@@ -7,7 +7,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from .losses import integrate_qccl
+from .losses import integrate_qccl, integrate_qfal
 from .query_conditioning import QueryEncoder, MultiLayerFiLMConditionalEntityEncoder
 from utils.runtime import get_device
 
@@ -31,6 +31,7 @@ class HGNN(nn.Module):
         binary_graph_encoder: nn.Module = None,
         fusion_method: str = "gate",
         qccl_config: Optional[Mapping[str, Any]] = None,
+        qfal_config: Optional[Mapping[str, Any]] = None,
     ):
         super(HGNN, self).__init__()
         self.bio_encoder = bio_encoder
@@ -56,6 +57,7 @@ class HGNN(nn.Module):
 
         # QCCL v2 runtime controls.
         self.qccl_cfg = self._resolve_qccl_cfg(qccl_config)
+        self.qfal_cfg = self._resolve_qfal_cfg(qfal_config)
         self.qccl_progress = 0.0
 
         # Typed memory queues for advanced QCCL negatives.
@@ -187,6 +189,32 @@ class HGNN(nn.Module):
         cfg["cond_dim_ratio"] = max(0.05, float(cfg["cond_dim_ratio"]))
         cfg["num_layers"] = max(1, int(cfg["num_layers"]))
         cfg["query_dropout"] = min(1.0, max(0.0, float(cfg["query_dropout"])))
+        return cfg
+
+    @classmethod
+    def _resolve_qfal_cfg(cls, qfal_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        defaults: Dict[str, Any] = {
+            "num_negatives": 64,
+            "temperature": 0.2,
+            "false_negative_weight": 0.05,
+            "known_positive_masking": True,
+            "self_adversarial": True,
+            "adversarial_temperature": 1.0,
+            "max_queries": 2048,
+        }
+        cfg = dict(defaults)
+        if qfal_config is not None:
+            for key, value in dict(qfal_config).items():
+                if key in cfg and value is not None:
+                    cfg[key] = value
+
+        cfg["num_negatives"] = max(1, int(cfg["num_negatives"]))
+        cfg["temperature"] = max(1e-6, float(cfg["temperature"]))
+        cfg["false_negative_weight"] = min(1.0, max(0.0, float(cfg["false_negative_weight"])))
+        cfg["known_positive_masking"] = cls._to_bool(cfg["known_positive_masking"])
+        cfg["self_adversarial"] = cls._to_bool(cfg["self_adversarial"])
+        cfg["adversarial_temperature"] = max(1e-6, float(cfg["adversarial_temperature"]))
+        cfg["max_queries"] = max(0, int(cfg["max_queries"]))
         return cfg
 
     def set_qccl_progress(self, epoch_progress: Optional[float]) -> None:
@@ -408,14 +436,36 @@ class HGNN(nn.Module):
             loss_disease = qccl_loss_for(pos_drugid, pos_geneid, pos_diseaseid, query_type="disease")
             CL_loss = (loss_gene + loss_drug + loss_disease) / 3
 
-        # 5. 计算排名指标
+        # 5. 计算 QFAL：decoder-based listwise ranking loss
+        QFAL_loss = torch.tensor(0.0, device=graph_embed_pos.device)
+        if "qfal" in self.loss_type and self.training and len(pos_drugid) > 0:
+            QFAL_loss = integrate_qfal(
+                model=self,
+                graph_embed=graph_embed_pos,
+                pos_drug_ids=pos_drugid,
+                pos_gene_ids=pos_geneid,
+                pos_disease_ids=pos_diseaseid,
+                num_drugs=x_drug.shape[0],
+                num_genes=x_gene.shape[0],
+                num_diseases=x_disease.shape[0],
+                replace_dims=self.replace_dims,
+                num_negatives=int(self.qfal_cfg.get("num_negatives", 64)),
+                temperature=float(self.qfal_cfg.get("temperature", 0.2)),
+                false_negative_weight=float(self.qfal_cfg.get("false_negative_weight", 0.05)),
+                known_positive_masking=bool(self.qfal_cfg.get("known_positive_masking", True)),
+                self_adversarial=bool(self.qfal_cfg.get("self_adversarial", True)),
+                adversarial_temperature=float(self.qfal_cfg.get("adversarial_temperature", 1.0)),
+                max_queries=int(self.qfal_cfg.get("max_queries", 2048)),
+            )
+
+        # 6. 计算排名指标
         mrr = torch.tensor(0.0, device=graph_embed_pos.device)
         all_ranks = []
 
         if self.replace_dims and len(pos_drugid) > 0 and pos_geneid is not None and pos_diseaseid is not None:
             mrr, all_ranks = self._calculate_ranking_metrics(graph_embed_pos, pos_drugid, pos_geneid, pos_diseaseid, x_drug.shape[0], x_gene.shape[0], x_disease.shape[0])
 
-        return res, CL_loss, mrr, all_ranks
+        return res, CL_loss, QFAL_loss, mrr, all_ranks
 
     def _calculate_ranking_metrics(self, graph_embed, pos_drugid, pos_geneid, pos_diseaseid, num_drugs, num_genes, num_diseases):
         """计算MRR和排名"""

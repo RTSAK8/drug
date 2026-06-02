@@ -8,7 +8,10 @@ import torch.nn as nn
 
 class Decoder(nn.Module):
     """
-    解码器：预测三元组关联概率
+    解码器：预测三元组关联 logit。
+
+    注意：这里不再做 sigmoid。训练时使用 BCEWithLogitsLoss，
+    评估 AUC/AUPR/F1 时再在外部做 torch.sigmoid(logits)。
     """
 
     def __init__(self, decoder_input_dim):
@@ -45,5 +48,5 @@ class Decoder(nn.Module):
         x = self.bn2(x)
         x = self.dropout(x)
 
-        x = self.fc3(x)
-        return torch.sigmoid(x.squeeze(dim=1))
+        logits = self.fc3(x).squeeze(dim=1)
+        return logits

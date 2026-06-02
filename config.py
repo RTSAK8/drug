@@ -16,9 +16,12 @@ class Config:
     # 训练参数
     epochs: int = 1000
     learning_rate: float = 0.005
-    alpha: float = 0.4  # 对比学习权重
+    alpha: float = 0.4  # 兼容原始 BCE + QCCL 权重
+    bce_weight: float = 0.3
+    qfal_weight: float = 0.5
+    qccl_weight: float = 0.2
     L2: float = 1e-4
-    loss_type: List[str] = field(default_factory=lambda: ["qccl"])  # 使用QCCL
+    loss_type: List[str] = field(default_factory=lambda: ["qccl"])  # 可选: qccl, qfal
 
     # 数据参数
     data_dir: str = "./dataset"
@@ -83,6 +86,15 @@ class Config:
     qccl_memory_queue_size: int = 0
     qccl_memory_queue_warmup_progress: float = 0.0
     qccl_memory_queue_negatives_per_query: int = 0
+
+    # QFAL: Query-conditioned False-negative-aware Listwise Ranking Loss
+    qfal_num_negatives: int = 64
+    qfal_temperature: float = 0.2
+    qfal_known_positive_masking: bool = True
+    qfal_false_negative_weight: float = 0.05
+    qfal_self_adversarial: bool = True
+    qfal_adversarial_temperature: float = 1.0
+    qfal_max_queries: int = 2048
 
     # QCCL模块结构（方便消融）
     qccl_cond_dim_ratio: float = 0.5

@@ -208,3 +208,209 @@ def integrate_qccl(
     loss = sample_loss.mean()
 
     return loss
+
+
+def integrate_qfal(
+    model,
+    graph_embed: torch.Tensor,
+    pos_drug_ids,
+    pos_gene_ids,
+    pos_disease_ids,
+    num_drugs: int,
+    num_genes: int,
+    num_diseases: int,
+    replace_dims,
+    num_negatives: int = 64,
+    temperature: float = 0.2,
+    false_negative_weight: float = 0.05,
+    known_positive_masking: bool = True,
+    self_adversarial: bool = True,
+    adversarial_temperature: float = 1.0,
+    max_queries: int = 2048,
+):
+    """
+    Query-conditioned False-negative-aware Listwise Ranking Loss (QFAL).
+
+    作用：让 decoder 直接学习实体补全排序。
+    - gene mode:    query = (drug, ?, disease), answer = gene
+    - disease mode: query = (drug, gene, ?), answer = disease
+
+    说明：
+    1. 正确实体固定放在候选列表第 0 列。
+    2. 随机采样 K 个同类型实体作为候选负样本。
+    3. 用 decoder logits 做 listwise softmax ranking。
+    4. 如果 sampled negative 是同一 query 下的已知正样本，则降低其负样本权重。
+    5. 可选 self-adversarial weighting：高分负样本获得更高权重。
+    """
+    device = graph_embed.device
+
+    def _to_long_tensor(values):
+        if isinstance(values, torch.Tensor):
+            return values.to(device=device, dtype=torch.long).reshape(-1)
+        return torch.as_tensor(values, device=device, dtype=torch.long).reshape(-1)
+
+    pos_drug_ids = _to_long_tensor(pos_drug_ids)
+    pos_gene_ids = _to_long_tensor(pos_gene_ids)
+    pos_disease_ids = _to_long_tensor(pos_disease_ids)
+
+    num_pos = int(pos_drug_ids.numel())
+    if num_pos == 0:
+        return torch.tensor(0.0, device=device)
+
+    # 避免 full-batch QFAL 展开过大导致 OOM。
+    max_queries = int(max_queries) if max_queries is not None else 0
+    if max_queries > 0 and num_pos > max_queries:
+        idx = torch.randperm(num_pos, device=device)[:max_queries]
+        pos_drug_ids = pos_drug_ids.index_select(0, idx)
+        pos_gene_ids = pos_gene_ids.index_select(0, idx)
+        pos_disease_ids = pos_disease_ids.index_select(0, idx)
+        num_pos = int(pos_drug_ids.numel())
+
+    if isinstance(replace_dims, (list, tuple)) and len(replace_dims) > 0:
+        mode = str(replace_dims[0]).lower().strip()
+    else:
+        mode = str(replace_dims).lower().strip()
+
+    num_negatives = max(1, int(num_negatives))
+    temperature = max(1e-6, float(temperature))
+    false_negative_weight = min(1.0, max(0.0, float(false_negative_weight)))
+    adversarial_temperature = max(1e-6, float(adversarial_temperature))
+
+    known_triples = torch.stack([pos_drug_ids, pos_gene_ids, pos_disease_ids], dim=1).detach().cpu().tolist()
+
+    if mode == "gene":
+        # key = (drug, disease), value = known positive genes under this query
+        known_answer_map = {}
+        for d, g, c in known_triples:
+            known_answer_map.setdefault((int(d), int(c)), set()).add(int(g))
+
+        candidate_start = int(num_drugs)
+        candidate_end = int(num_drugs + num_genes)
+        true_answers = pos_gene_ids
+
+        neg_candidates = torch.randint(
+            low=candidate_start,
+            high=candidate_end,
+            size=(num_pos, num_negatives),
+            device=device,
+        )
+
+        # 避免直接采到当前正答案。
+        same_mask = neg_candidates == true_answers.unsqueeze(1)
+        for _ in range(3):
+            if not bool(same_mask.any()):
+                break
+            neg_candidates[same_mask] = torch.randint(
+                low=candidate_start,
+                high=candidate_end,
+                size=(int(same_mask.sum().item()),),
+                device=device,
+            )
+            same_mask = neg_candidates == true_answers.unsqueeze(1)
+
+        candidates = torch.cat([true_answers.unsqueeze(1), neg_candidates], dim=1)
+        batch_drug = pos_drug_ids.unsqueeze(1).expand(-1, num_negatives + 1)
+        batch_gene = candidates
+        batch_disease = pos_disease_ids.unsqueeze(1).expand(-1, num_negatives + 1)
+
+        flat_scores = model.decoder(
+            graph_embed,
+            batch_drug.reshape(-1),
+            batch_gene.reshape(-1),
+            batch_disease.reshape(-1),
+        )
+        scores = flat_scores.view(num_pos, num_negatives + 1)
+
+        neg_weights = torch.ones((num_pos, num_negatives), device=device)
+        if known_positive_masking:
+            neg_cpu = neg_candidates.detach().cpu().tolist()
+            d_cpu = pos_drug_ids.detach().cpu().tolist()
+            c_cpu = pos_disease_ids.detach().cpu().tolist()
+            for i in range(num_pos):
+                known_answers = known_answer_map.get((int(d_cpu[i]), int(c_cpu[i])), set())
+                if not known_answers:
+                    continue
+                for j in range(num_negatives):
+                    if int(neg_cpu[i][j]) in known_answers:
+                        neg_weights[i, j] = false_negative_weight
+
+    elif mode == "disease":
+        # key = (drug, gene), value = known positive diseases under this query
+        known_answer_map = {}
+        for d, g, c in known_triples:
+            known_answer_map.setdefault((int(d), int(g)), set()).add(int(c))
+
+        candidate_start = int(num_drugs + num_genes)
+        candidate_end = int(num_drugs + num_genes + num_diseases)
+        true_answers = pos_disease_ids
+
+        neg_candidates = torch.randint(
+            low=candidate_start,
+            high=candidate_end,
+            size=(num_pos, num_negatives),
+            device=device,
+        )
+
+        same_mask = neg_candidates == true_answers.unsqueeze(1)
+        for _ in range(3):
+            if not bool(same_mask.any()):
+                break
+            neg_candidates[same_mask] = torch.randint(
+                low=candidate_start,
+                high=candidate_end,
+                size=(int(same_mask.sum().item()),),
+                device=device,
+            )
+            same_mask = neg_candidates == true_answers.unsqueeze(1)
+
+        candidates = torch.cat([true_answers.unsqueeze(1), neg_candidates], dim=1)
+        batch_drug = pos_drug_ids.unsqueeze(1).expand(-1, num_negatives + 1)
+        batch_gene = pos_gene_ids.unsqueeze(1).expand(-1, num_negatives + 1)
+        batch_disease = candidates
+
+        flat_scores = model.decoder(
+            graph_embed,
+            batch_drug.reshape(-1),
+            batch_gene.reshape(-1),
+            batch_disease.reshape(-1),
+        )
+        scores = flat_scores.view(num_pos, num_negatives + 1)
+
+        neg_weights = torch.ones((num_pos, num_negatives), device=device)
+        if known_positive_masking:
+            neg_cpu = neg_candidates.detach().cpu().tolist()
+            d_cpu = pos_drug_ids.detach().cpu().tolist()
+            g_cpu = pos_gene_ids.detach().cpu().tolist()
+            for i in range(num_pos):
+                known_answers = known_answer_map.get((int(d_cpu[i]), int(g_cpu[i])), set())
+                if not known_answers:
+                    continue
+                for j in range(num_negatives):
+                    if int(neg_cpu[i][j]) in known_answers:
+                        neg_weights[i, j] = false_negative_weight
+
+    else:
+        # 当前实验主要是 gene / disease mode。drug mode 后续需要时再补。
+        return torch.tensor(0.0, device=device)
+
+    scaled_scores = scores / temperature
+
+    # self-adversarial hard-negative weighting：当前模型分数越高的负样本权重越大。
+    if self_adversarial:
+        with torch.no_grad():
+            neg_scores = scaled_scores[:, 1:]
+            adv_weights = torch.softmax(neg_scores / adversarial_temperature, dim=1)
+            # 乘以 num_negatives 让平均尺度接近 1，避免整体 denominator 被压得过小。
+            adv_weights = adv_weights * float(num_negatives)
+        neg_weights = neg_weights * adv_weights
+
+    # 加权 listwise softmax：
+    # denominator = exp(pos) + sum_i w_i * exp(neg_i)
+    pos_log_weight = torch.zeros((num_pos, 1), device=device)
+    neg_log_weight = torch.log(neg_weights.clamp_min(1e-8))
+    log_weights = torch.cat([pos_log_weight, neg_log_weight], dim=1)
+
+    log_denom = torch.logsumexp(scaled_scores + log_weights, dim=1)
+    pos_score = scaled_scores[:, 0]
+    loss = -(pos_score - log_denom).mean()
+    return loss
