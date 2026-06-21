@@ -36,6 +36,7 @@ def train_fold_model(
     config: Config,
     use_checkpoint: bool = True,
     wandb_run=None,
+    total_folds: int = 1,
 ):
     """训练模型，并在给定评估集上评估（use_checkpoint=False 时不做训练中验证/选最优）"""
 
@@ -129,7 +130,12 @@ def train_fold_model(
     model_path = f"best_model_{current_mode[0]}_{ablation_name}_fold{fold}.pth"
 
     for epoch in range(config.epochs):
-        global_step = mode_index * (total_ablations * config.epochs) + ablation_index * config.epochs + epoch + 1
+        global_step = (
+            ((mode_index * total_ablations + ablation_index) * max(int(total_folds), 1) + int(fold))
+            * config.epochs
+            + epoch
+            + 1
+        )
         epoch_progress = float(epoch) / float(max(config.epochs - 1, 1))
 
         train_metrics = train_step(
@@ -216,7 +222,7 @@ def train_fold_model(
         calibrated_threshold = None
 
         if not use_checkpoint:
-            # 独立测试模式下，阈值仅用训练集校准，避免在test上选阈值产生乐观偏差
+            # 独立测试 / 交叉验证测试 fold 模式下，阈值仅用训练集校准，避免在评估集上选阈值产生乐观偏差
             train_data_tensor = torch.from_numpy(train_data).long().to(device)
             train_pos_tensor = torch.from_numpy(train_pos).long().to(device)
 

@@ -8,7 +8,7 @@ from utils.runtime import get_device
 
 from .data_prep import set_seed, prepare_triplets_data
 from .init_wandb import init_wandb_run
-from .mode_runner import run_mode_experiment
+from .mode_runner import run_mode_experiment, run_mode_cross_validation
 
 
 # 设置设备
@@ -78,22 +78,41 @@ def run_experiment(config: Config):
         ablation_count=len(config.graph_ablation_configs),
     )
     try:
+        eval_protocol = str(getattr(config, "eval_protocol", "independent_test")).lower().strip()
+
         for mode_index, current_mode in enumerate(modes):
             # 3. run mode experiment
-            run_mode_experiment(
-                current_mode=current_mode,
-                mode_index=mode_index,
-                train_triplets_df=train_triplets_df,
-                test_triplets_df=test_triplets_df,
-                global_pos_set=global_pos_set,
-                global_edges=global_edges,
-                data_manager=data_manager,
-                drug_fea=drug_fea,
-                gene_fea=gene_fea,
-                disease_fea=disease_fea,
-                config=config,
-                wandb_run=wandb_run,
-            )
+            if eval_protocol in {"cross_validation", "cv", "kfold", "5fold"}:
+                run_mode_cross_validation(
+                    current_mode=current_mode,
+                    mode_index=mode_index,
+                    all_triplets_df=train_triplets_df,
+                    global_pos_set=global_pos_set,
+                    global_edges=global_edges,
+                    data_manager=data_manager,
+                    drug_fea=drug_fea,
+                    gene_fea=gene_fea,
+                    disease_fea=disease_fea,
+                    config=config,
+                    wandb_run=wandb_run,
+                )
+            elif eval_protocol in {"independent_test", "train_test", "external_test"}:
+                run_mode_experiment(
+                    current_mode=current_mode,
+                    mode_index=mode_index,
+                    train_triplets_df=train_triplets_df,
+                    test_triplets_df=test_triplets_df,
+                    global_pos_set=global_pos_set,
+                    global_edges=global_edges,
+                    data_manager=data_manager,
+                    drug_fea=drug_fea,
+                    gene_fea=gene_fea,
+                    disease_fea=disease_fea,
+                    config=config,
+                    wandb_run=wandb_run,
+                )
+            else:
+                raise ValueError(f"Unknown eval_protocol: {eval_protocol}")
     finally:
         if wandb_run is not None:
             wandb_run.finish()

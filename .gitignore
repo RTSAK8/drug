@@ -3,3 +3,4 @@ results/
 dataset/
 .vscode/
 wandb/
+logs/

@@ -30,6 +30,11 @@ class Config:
     report_overlap_stats: bool = True
     drop_test_overlap_with_train: bool = False
 
+    # 评估协议
+    # independent_test: triplets.csv 全量训练 + drugbank_triplets.csv 独立测试
+    # cross_validation: 对 triplets.csv 做 K 折交叉验证
+    eval_protocol: str = "independent_test"
+
     # 交叉验证参数
     n_splits: int = 5
     random_state: int = 42
