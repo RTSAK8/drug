@@ -7,7 +7,7 @@ import torch.nn as nn
 import numpy as np
 from typing import Dict, Tuple
 
-from .metrics import calculate_hits_ranking_based, metrics_graph_with_hits
+from .metrics import calculate_ranking_metrics, metrics_graph_with_hits
 from .runtime import get_device
 
 device = get_device()
@@ -78,8 +78,10 @@ def train_step(
     total_loss.backward()
     optimizer.step()
 
-    # 计算Hit@K
-    hits = calculate_hits_ranking_based(ranks, [1, 3, 5])
+    # 计算 ranking-based Hit@K / Recall@K
+    ranking_metrics = calculate_ranking_metrics(ranks)
+    hits = {k: v for k, v in ranking_metrics.items() if k.startswith("hit@")}
+    recalls = {k: v for k, v in ranking_metrics.items() if k.startswith("recall@")}
 
     # 打印训练信息
     if epoch % 10 == 0:
@@ -92,7 +94,9 @@ def train_step(
             f"MRR={mrr:.4f}, "
             f'Hit@1={hits["hit@1"]:.4f}, '
             f'Hit@3={hits["hit@3"]:.4f}, '
-            f'Hit@5={hits["hit@5"]:.4f}'
+            f'Hit@5={hits["hit@5"]:.4f}, '
+            f'Recall@10={recalls["recall@10"]:.4f}, '
+            f'Recall@100={recalls["recall@100"]:.4f}'
         )
 
     return {
@@ -104,6 +108,11 @@ def train_step(
         "hit@1": float(hits["hit@1"]),
         "hit@3": float(hits["hit@3"]),
         "hit@5": float(hits["hit@5"]),
+        "recall@1": float(recalls["recall@1"]),
+        "recall@5": float(recalls["recall@5"]),
+        "recall@10": float(recalls["recall@10"]),
+        "recall@50": float(recalls["recall@50"]),
+        "recall@100": float(recalls["recall@100"]),
     }
 
 
@@ -153,6 +162,7 @@ def validate_step(
         y_true = val_data[:, 3]
         y_pred = torch.sigmoid(pred_logits).cpu().numpy()
 
-        auc_score, aupr_score, f1_score, threshold, hits = metrics_graph_with_hits(y_true, y_pred)
+        auc_score, aupr_score, f1_score, threshold, _ = metrics_graph_with_hits(y_true, y_pred)
+        ranking_metrics = calculate_ranking_metrics(ranks)
 
-        return auc_score, aupr_score, f1_score, threshold, float(mrr), hits
+        return auc_score, aupr_score, f1_score, threshold, float(mrr), ranking_metrics

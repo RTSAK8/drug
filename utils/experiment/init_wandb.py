@@ -46,6 +46,11 @@ def init_wandb_run(config: Config, data_manager, ablation_count: int):
         run.define_metric(f"{mode_key}/train_hit@1", step_metric=f"{mode_key}/train_epoch")
         run.define_metric(f"{mode_key}/train_hit@3", step_metric=f"{mode_key}/train_epoch")
         run.define_metric(f"{mode_key}/train_hit@5", step_metric=f"{mode_key}/train_epoch")
+        run.define_metric(f"{mode_key}/train_recall@1", step_metric=f"{mode_key}/train_epoch")
+        run.define_metric(f"{mode_key}/train_recall@5", step_metric=f"{mode_key}/train_epoch")
+        run.define_metric(f"{mode_key}/train_recall@10", step_metric=f"{mode_key}/train_epoch")
+        run.define_metric(f"{mode_key}/train_recall@50", step_metric=f"{mode_key}/train_epoch")
+        run.define_metric(f"{mode_key}/train_recall@100", step_metric=f"{mode_key}/train_epoch")
         run.define_metric(f"{mode_key}/val_epoch", hidden=True)
         run.define_metric(f"{mode_key}/val/*", step_metric=f"{mode_key}/val_epoch")
 

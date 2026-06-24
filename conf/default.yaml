@@ -6,6 +6,11 @@ loss_type:
   - qccl
 
 data_dir: ./dataset
+results_dir: ./results
+
+# 评估协议：independent_test/train_test 使用 triplets.csv 训练、drugbank_triplets.csv 测试；
+# cross_validation 使用 triplets.csv 做 K 折交叉验证。
+eval_protocol: independent_test
 neg_ratio: 3
 max_attempts: 50
 

@@ -17,7 +17,8 @@ print(f"使用设备: {device}")
 
 
 def run_experiment(config: Config):
-    # set_seed(config.random_state)
+    set_seed(int(getattr(config, "random_state", 42)))
+    print(f"随机种子: {int(getattr(config, 'random_state', 42))}")
     # 1. prepare data
     data_manager = DataManager(config)
 

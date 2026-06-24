@@ -116,7 +116,20 @@ def _metric_mean_std(all_fold_metrics):
 
 def _print_avg_metrics(avg_metrics):
     """按统一格式打印汇总指标。"""
-    for name in ["auc", "aupr", "f1_score", "mrr", "hit@1", "hit@3", "hit@5"]:
+    for name in [
+        "auc",
+        "aupr",
+        "f1_score",
+        "mrr",
+        "hit@1",
+        "hit@3",
+        "hit@5",
+        "recall@1",
+        "recall@5",
+        "recall@10",
+        "recall@50",
+        "recall@100",
+    ]:
         mean_key = f"{name}_mean"
         std_key = f"{name}_std"
         if mean_key in avg_metrics:
@@ -224,6 +237,11 @@ def run_mode_experiment(
             wandb_run.summary[f"{mode_key}.test.hit@1"] = float(test_metrics.get("hit@1", 0.0))
             wandb_run.summary[f"{mode_key}.test.hit@3"] = float(test_metrics.get("hit@3", 0.0))
             wandb_run.summary[f"{mode_key}.test.hit@5"] = float(test_metrics.get("hit@5", 0.0))
+            wandb_run.summary[f"{mode_key}.test.recall@1"] = float(test_metrics.get("recall@1", 0.0))
+            wandb_run.summary[f"{mode_key}.test.recall@5"] = float(test_metrics.get("recall@5", 0.0))
+            wandb_run.summary[f"{mode_key}.test.recall@10"] = float(test_metrics.get("recall@10", 0.0))
+            wandb_run.summary[f"{mode_key}.test.recall@50"] = float(test_metrics.get("recall@50", 0.0))
+            wandb_run.summary[f"{mode_key}.test.recall@100"] = float(test_metrics.get("recall@100", 0.0))
 
         save_summary_results(
             mode=current_mode[0],
@@ -231,6 +249,7 @@ def run_mode_experiment(
             avg_metrics=avg_metrics,
             all_fold_metrics=[test_metrics],
             config=vars(config),
+            results_dir=getattr(config, "results_dir", "results"),
         )
 
 
@@ -353,4 +372,5 @@ def run_mode_cross_validation(
             avg_metrics=avg_metrics,
             all_fold_metrics=all_fold_metrics,
             config=vars(config),
+            results_dir=getattr(config, "results_dir", "results"),
         )

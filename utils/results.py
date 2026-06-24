@@ -44,11 +44,9 @@ def save_results(mode: str, ablation_name: str, fold: int, metrics: Dict, config
         "mode": mode,
         "ablation": ablation_name,
         "fold": fold,
-        "auc": metrics.get("auc", 0),
-        "aupr": metrics.get("aupr", 0),
-        "f1_score": metrics.get("f1_score", 0),
-        "threshold": metrics.get("threshold", 0),
     }
+    for metric_name, value in metrics.items():
+        result_row[metric_name] = value
 
     df = pd.DataFrame([result_row])
     if os.path.exists(summary_file):
@@ -100,23 +98,11 @@ def save_summary_results(mode: str, ablation_name: str, avg_metrics: Dict, all_f
         "mode": mode,
         "ablation": ablation_name,
         "n_folds": len(all_fold_metrics),
-        # 平均值
-        "auc_mean": avg_metrics.get("auc_mean", 0),
-        "aupr_mean": avg_metrics.get("aupr_mean", 0),
-        "f1_score_mean": avg_metrics.get("f1_score_mean", 0),
-        "mrr_mean": avg_metrics.get("mrr_mean", 0),
-        "hit@1_mean": avg_metrics.get("hit@1_mean", 0),
-        "hit@3_mean": avg_metrics.get("hit@3_mean", 0),
-        "hit@5_mean": avg_metrics.get("hit@5_mean", 0),
-        # 标准差
-        "auc_std": avg_metrics.get("auc_std", 0),
-        "aupr_std": avg_metrics.get("aupr_std", 0),
-        "f1_score_std": avg_metrics.get("f1_score_std", 0),
-        "mrr_std": avg_metrics.get("mrr_std", 0),
-        "hit@1_std": avg_metrics.get("hit@1_std", 0),
-        "hit@3_std": avg_metrics.get("hit@3_std", 0),
-        "hit@5_std": avg_metrics.get("hit@5_std", 0),
     }
+
+    # 动态写入所有 mean/std 指标，避免新增 Recall@K 后结果文件漏列。
+    for metric_name, value in avg_metrics.items():
+        summary_row[metric_name] = value
 
     # 可选：添加每个fold的原始值（展开为列）
     for fold_idx, fold_metrics in enumerate(all_fold_metrics):

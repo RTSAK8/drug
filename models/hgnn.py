@@ -519,7 +519,13 @@ class HGNN(nn.Module):
         sorted_candidates = torch.gather(candidate_matrix, 1, sorted_indices)
         target_matrix = target_ids.unsqueeze(1).expand(-1, len(candidate_ids))
 
-        ranks = (sorted_candidates == target_matrix).nonzero(as_tuple=True)[1] + 1
+        match_matrix = sorted_candidates == target_matrix
+        # 正常情况下 target 必然在候选全集中；这里保底处理异常映射，避免 rank 数量少于 batch_size。
+        has_match = match_matrix.any(dim=1)
+        first_match = match_matrix.to(torch.int64).argmax(dim=1) + 1
+        fallback_rank = torch.full_like(first_match, fill_value=len(candidate_ids) + 1)
+        ranks = torch.where(has_match, first_match, fallback_rank)
+
         all_ranks = ranks.cpu().numpy().tolist()
         reciprocal_ranks = 1.0 / ranks.float()
         mrr = reciprocal_ranks.mean()

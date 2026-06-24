@@ -29,6 +29,7 @@ class Config:
     max_attempts: int = 50
     report_overlap_stats: bool = True
     drop_test_overlap_with_train: bool = False
+    results_dir: str = "results"
 
     # 评估协议
     # independent_test: triplets.csv 全量训练 + drugbank_triplets.csv 独立测试

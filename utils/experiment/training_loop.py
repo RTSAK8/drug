@@ -7,7 +7,7 @@ import torch.nn as nn
 from config import Config
 from models import BioEncoder, HgnnEncoder, RelationalGraphEncoder, Decoder, HGNN
 from utils.runtime import get_device
-from utils.metrics import metrics_graph_with_hits, calculate_hits_ranking_based
+from utils.metrics import calculate_ranking_metrics, metrics_graph_with_hits
 from utils.training import train_step, validate_step
 
 
@@ -171,6 +171,11 @@ def train_fold_model(
                     f"{mode_key}/train_hit@1": float(train_metrics["hit@1"]),
                     f"{mode_key}/train_hit@3": float(train_metrics["hit@3"]),
                     f"{mode_key}/train_hit@5": float(train_metrics["hit@5"]),
+                    f"{mode_key}/train_recall@1": float(train_metrics["recall@1"]),
+                    f"{mode_key}/train_recall@5": float(train_metrics["recall@5"]),
+                    f"{mode_key}/train_recall@10": float(train_metrics["recall@10"]),
+                    f"{mode_key}/train_recall@50": float(train_metrics["recall@50"]),
+                    f"{mode_key}/train_recall@100": float(train_metrics["recall@100"]),
                     f"{mode_key}/train_epoch": int(epoch + 1),
                 },
                 step=global_step,
@@ -192,7 +197,13 @@ def train_fold_model(
                 epoch_progress=epoch_progress,
             )
 
-            print(f"Epoch {epoch+1:03d} | Val: AUC={auc:.4f}, AUPR={aupr:.4f}, " f"F1={f1_score:.4f}, thresh={threshold:.4f}, ")
+            print(
+                f"Epoch {epoch+1:03d} | Val: "
+                f"AUC={auc:.4f}, AUPR={aupr:.4f}, F1={f1_score:.4f}, "
+                f"thresh={threshold:.4f}, MRR={mrr:.4f}, "
+                f"Hit@1={hits.get('hit@1', 0.0):.4f}, Hit@5={hits.get('hit@5', 0.0):.4f}, "
+                f"Recall@10={hits.get('recall@10', 0.0):.4f}, Recall@100={hits.get('recall@100', 0.0):.4f}"
+            )
 
             if mrr > best_mrr:
                 best_mrr = mrr
@@ -208,6 +219,14 @@ def train_fold_model(
                         f"{mode_key}/val/f1_score": float(f1_score),
                         f"{mode_key}/val/threshold": float(threshold),
                         f"{mode_key}/val/mrr": float(mrr),
+                        f"{mode_key}/val/hit@1": float(hits.get("hit@1", 0.0)),
+                        f"{mode_key}/val/hit@3": float(hits.get("hit@3", 0.0)),
+                        f"{mode_key}/val/hit@5": float(hits.get("hit@5", 0.0)),
+                        f"{mode_key}/val/recall@1": float(hits.get("recall@1", 0.0)),
+                        f"{mode_key}/val/recall@5": float(hits.get("recall@5", 0.0)),
+                        f"{mode_key}/val/recall@10": float(hits.get("recall@10", 0.0)),
+                        f"{mode_key}/val/recall@50": float(hits.get("recall@50", 0.0)),
+                        f"{mode_key}/val/recall@100": float(hits.get("recall@100", 0.0)),
                     },
                     step=global_step,
                 )
@@ -272,7 +291,7 @@ def train_fold_model(
         y_pred = torch.sigmoid(pred_logits).cpu().numpy()
 
         auc, aupr, best_f1_score, threshold, _ = metrics_graph_with_hits(y_true, y_pred, fixed_threshold=calibrated_threshold)
-        rank_hits = calculate_hits_ranking_based(ranks, [1, 3, 5])
+        ranking_metrics = calculate_ranking_metrics(ranks)
 
         final_metrics = {
             "auc": auc,
@@ -280,10 +299,8 @@ def train_fold_model(
             "f1_score": best_f1_score,
             "threshold": threshold,
             "mrr": float(mrr),
-            "hit@1": float(rank_hits["hit@1"]),
-            "hit@3": float(rank_hits["hit@3"]),
-            "hit@5": float(rank_hits["hit@5"]),
         }
+        final_metrics.update({metric_name: float(metric_value) for metric_name, metric_value in ranking_metrics.items()})
 
         print(f"  threshold_source: {threshold_source}")
 
