@@ -1,0 +1,124 @@
+# 独立入口：仅运行一次 missing-disease 统计，并自动绘制三联雷达图。
+epochs: 1000
+learning_rate: 0.005
+alpha: 0.4
+bce_weight: 0.3
+qfal_weight: 0.5
+qccl_weight: 0.2
+L2: 1e-4
+loss_type:
+  - qccl
+  - qfal
+
+data_dir: ./dataset
+results_dir: ./results/disease_radar_once_v2
+
+# 使用与示例更接近的 ICD-11 章节细分轴。
+disease_mapping_file: ./resources/disease_icd11_mapping.csv
+radar_class_column: Paper_Radar_Class_EN
+radar_method_name: OURS
+save_category_metrics: true
+save_category_raw_records: true
+
+# 核心限制：只运行 disease，且只做一次疾病类别分层留出。
+experiment_modes:
+  - disease
+eval_protocol: category_stratified_holdout
+neg_ratio: 3
+max_attempts: 50
+
+# 为雷达图尽量覆盖全部 13 个可用疾病大类。
+# 该留出仅用于类别雷达图，不替代 DrugBank external-test 主结果。
+radar_holdout_fraction: 0.20
+radar_min_test_per_class: 1
+radar_class_order:
+  - Infectious
+  - Neoplasms
+  - Hematol.
+  - Endocrine
+  - Psychiatr.
+  - Neurol.
+  - Ophthalm.
+  - Cardiovasc.
+  - Respiratory
+  - Gastrointest.
+  - Dermatol.
+  - Musculosk.
+  - Others
+
+# -1 表示入口脚本在启动时生成一个新的系统随机种子。
+n_splits: 1
+random_state: -1
+
+encoder_output_dim: 128
+hidden_dim: 512
+
+hgnn_use_residual: true
+hgnn_jk: last
+hgnn_norm: batch
+hgnn_hyperedge_dropout: 0.0
+hgnn_dropout: 0.4
+
+rgcn_use_residual: true
+rgcn_dropout: 0.4
+fusion_method: concat
+
+qccl_temperature: 0.3
+qccl_gene_query_temperature: -1.0
+qccl_drug_query_temperature: -1.0
+qccl_disease_query_temperature: -1.0
+qccl_asymmetric_norm_mode: symmetric
+
+qccl_multi_positive: false
+qccl_hardness_reweight: false
+qccl_hardness_alpha: 1.0
+qccl_hardness_temperature: 1.0
+qccl_query_hardness_reweight: false
+qccl_query_hardness_alpha: 1.0
+qccl_query_hardness_temperature: 1.0
+
+qccl_three_pool_schedule: false
+qccl_pool_easy_quantile: 0.33
+qccl_pool_hard_quantile: 0.66
+qccl_pool_start_weights: [1.25, 1.0, 0.75]
+qccl_pool_end_weights: [0.75, 1.0, 1.25]
+
+qccl_memory_queue: false
+qccl_memory_queue_size: 0
+qccl_memory_queue_warmup_progress: 0.0
+qccl_memory_queue_negatives_per_query: 0
+
+qfal_num_negatives: 64
+qfal_temperature: 0.2
+qfal_known_positive_masking: true
+qfal_false_negative_weight: 0.05
+qfal_self_adversarial: true
+qfal_adversarial_temperature: 1.0
+qfal_max_queries: 2048
+
+qccl_cond_dim_ratio: 0.5
+qccl_num_layers: 2
+qccl_query_dropout: 0.3
+qccl_film_layer_norm: false
+
+# 单独统计默认不上传 W&B；需要时可在命令行覆盖 use_wandb=true。
+use_wandb: false
+wandb_project: Drug Prediction
+wandb_entity: ""
+wandb_name_prefix: disease_radar_once
+wandb_run_index: 1
+
+# 只保留一个实验配置，避免一次入口中重复执行多个消融。
+graph_ablation_configs:
+  WithoutGeneHyperedges:
+    - ppi
+    - dpi
+    - ddi
+    - protein_disease
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

@@ -8,6 +8,7 @@ from config import Config
 from models import BioEncoder, HgnnEncoder, RelationalGraphEncoder, Decoder, HGNN
 from utils.runtime import get_device
 from utils.metrics import calculate_ranking_metrics, metrics_graph_with_hits
+from utils.category_metrics import save_category_metrics_for_fold
 from utils.training import train_step, validate_step
 
 
@@ -37,6 +38,9 @@ def train_fold_model(
     use_checkpoint: bool = True,
     wandb_run=None,
     total_folds: int = 1,
+    disease_offset: int = 0,
+    disease_idx_to_id=None,
+    val_query_disease_ids=None,
 ):
     """训练模型，并在给定评估集上评估（use_checkpoint=False 时不做训练中验证/选最优）"""
 
@@ -301,6 +305,32 @@ def train_fold_model(
             "mrr": float(mrr),
         }
         final_metrics.update({metric_name: float(metric_value) for metric_name, metric_value in ranking_metrics.items()})
+
+        if bool(getattr(config, "save_category_metrics", True)) and disease_idx_to_id is not None:
+            radar_method_name = str(getattr(config, "radar_method_name", "")).strip()
+            if not radar_method_name:
+                radar_method_name = str(getattr(config, "wandb_name_prefix", ablation_name)).strip()
+            save_category_metrics_for_fold(
+                val_data=val_data,
+                y_pred=y_pred,
+                val_pos=val_pos,
+                ranks=ranks,
+                query_disease_ids=val_query_disease_ids,
+                threshold=threshold,
+                disease_offset=disease_offset,
+                disease_idx_to_id=disease_idx_to_id,
+                mapping_path=getattr(config, "disease_mapping_file", "./resources/disease_icd11_mapping.csv"),
+                class_column=getattr(config, "radar_class_column", "Radar_Class_EN"),
+                results_dir=getattr(config, "results_dir", "results"),
+                method=radar_method_name,
+                protocol=getattr(config, "eval_protocol", "unknown"),
+                mode=current_mode[0],
+                ablation=ablation_name,
+                fold=fold,
+                run_index=int(getattr(config, "wandb_run_index", 0)),
+                random_state=getattr(config, "random_state", None),
+                save_raw_records=bool(getattr(config, "save_category_raw_records", False)),
+            )
 
         print(f"  threshold_source: {threshold_source}")
 

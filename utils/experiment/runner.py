@@ -8,7 +8,11 @@ from utils.runtime import get_device
 
 from .data_prep import set_seed, prepare_triplets_data
 from .init_wandb import init_wandb_run
-from .mode_runner import run_mode_experiment, run_mode_cross_validation
+from .mode_runner import (
+    run_mode_category_stratified_holdout,
+    run_mode_cross_validation,
+    run_mode_experiment,
+)
 
 
 # 设置设备
@@ -70,7 +74,25 @@ def run_experiment(config: Config):
         else:
             print(f"  {edge_type}: {len(edge_data)} hyperedges")
 
-    modes = [["gene"], ["disease"]]
+    requested_modes = getattr(config, "experiment_modes", ["gene", "disease"])
+    if isinstance(requested_modes, str):
+        requested_modes = [requested_modes]
+
+    normalised_modes = []
+    for mode in requested_modes:
+        mode_name = str(mode).strip().lower()
+        if mode_name not in {"gene", "disease"}:
+            raise ValueError(
+                f"Unknown experiment mode: {mode!r}. Expected 'gene' or 'disease'."
+            )
+        if mode_name not in normalised_modes:
+            normalised_modes.append(mode_name)
+
+    if not normalised_modes:
+        raise ValueError("experiment_modes must contain at least one mode")
+
+    modes = [[mode_name] for mode_name in normalised_modes]
+    print(f"本次运行模式: {', '.join(normalised_modes)}")
 
     # 2. init wandb
     wandb_run = init_wandb_run(
@@ -85,6 +107,24 @@ def run_experiment(config: Config):
             # 3. run mode experiment
             if eval_protocol in {"cross_validation", "cv", "kfold", "5fold"}:
                 run_mode_cross_validation(
+                    current_mode=current_mode,
+                    mode_index=mode_index,
+                    all_triplets_df=train_triplets_df,
+                    global_pos_set=global_pos_set,
+                    global_edges=global_edges,
+                    data_manager=data_manager,
+                    drug_fea=drug_fea,
+                    gene_fea=gene_fea,
+                    disease_fea=disease_fea,
+                    config=config,
+                    wandb_run=wandb_run,
+                )
+            elif eval_protocol in {
+                "category_stratified_holdout",
+                "radar_holdout",
+                "stratified_holdout",
+            }:
+                run_mode_category_stratified_holdout(
                     current_mode=current_mode,
                     mode_index=mode_index,
                     all_triplets_df=train_triplets_df,

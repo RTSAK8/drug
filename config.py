@@ -31,8 +31,42 @@ class Config:
     drop_test_overlap_with_train: bool = False
     results_dir: str = "results"
 
+    # ICD-11 disease-category evaluation / radar plotting
+    disease_mapping_file: str = "./resources/disease_icd11_mapping.csv"
+    radar_class_column: str = "Radar_Class_EN"
+    radar_method_name: str = ""  # empty -> use wandb_name_prefix
+    save_category_metrics: bool = True
+    save_category_raw_records: bool = True
+
+    # 论文雷达图专用：从 triplets.csv 按疾病大类做一次分层留出。
+    # 该协议用于获得尽可能完整的疾病类别覆盖，不替代外部 DrugBank 测试结果。
+    radar_holdout_fraction: float = 0.20
+    radar_min_test_per_class: int = 1
+    radar_class_order: List[str] = field(
+        default_factory=lambda: [
+            "Infectious",
+            "Neoplasms",
+            "Hematol.",
+            "Endocrine",
+            "Psychiatr.",
+            "Neurol.",
+            "Ophthalm.",
+            "Cardiovasc.",
+            "Respiratory",
+            "Gastrointest.",
+            "Dermatol.",
+            "Musculosk.",
+            "Others",
+        ]
+    )
+
+    # 运行模式。默认同时运行 missing-gene 和 missing-disease；
+    # 单次疾病统计入口将其固定为 ["disease"]。
+    experiment_modes: List[str] = field(default_factory=lambda: ["gene", "disease"])
+
     # 评估协议
     # independent_test: triplets.csv 全量训练 + drugbank_triplets.csv 独立测试
+    # category_stratified_holdout: 按 Paper_Radar_Class_EN 从 triplets.csv 做一次分层留出
     # cross_validation: 对 triplets.csv 做 K 折交叉验证
     eval_protocol: str = "independent_test"
 

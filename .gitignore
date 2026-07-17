@@ -4,3 +4,5 @@ dataset/
 .vscode/
 wandb/
 logs/
+resources/
+*.log

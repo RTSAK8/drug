@@ -1,9 +1,15 @@
 import numpy as np
+import pandas as pd
 import torch
+from pathlib import Path
 from sklearn.model_selection import KFold
 
 from utils.hypergraph import build_hypergraph, build_binary_edges
-from utils.preprocessing import apply_offsets, generate_negatives_for_fold
+from utils.preprocessing import (
+    apply_offsets,
+    generate_negatives_for_fold,
+    generate_negatives_with_query_disease,
+)
 from utils.results import save_summary_results
 from utils.runtime import set_global_seed
 
@@ -34,7 +40,9 @@ def _build_fold_data(
         neg_ratio=config.neg_ratio,
     )
 
-    test_neg = generate_negatives_for_fold(
+    # 评估负样本额外记录其来源正查询的真实 Disease_ID。
+    # missing-disease 分类统计必须按真实查询疾病分组，而不是按负候选疾病分组。
+    test_neg, test_neg_query_disease_ids = generate_negatives_with_query_disease(
         pos_samples=test_df[["Drug_ID", "Gene_ID", "Disease_ID"]].values,
         drug_pool=train_drug_pool,
         gene_pool=train_gene_pool,
@@ -42,6 +50,7 @@ def _build_fold_data(
         global_exclude=global_pos_set.copy(),
         replace_dims=current_mode,
         neg_ratio=config.neg_ratio,
+        max_attempts=int(getattr(config, "max_attempts", 50)),
     )
 
     train_pos_offset = apply_offsets(
@@ -60,8 +69,21 @@ def _build_fold_data(
     train_data = np.vstack([train_pos_offset, train_neg_offset])
     test_data = np.vstack([test_pos_offset, test_neg_offset])
 
+    # 正样本的查询疾病就是其真实疾病；负样本使用负采样时保存的来源疾病。
+    test_pos_query_disease_ids = test_df["Disease_ID"].to_numpy(dtype=np.int64)
+    test_query_disease_ids = np.concatenate(
+        [test_pos_query_disease_ids, test_neg_query_disease_ids]
+    )
+    if len(test_query_disease_ids) != len(test_data):
+        raise RuntimeError(
+            "test query-disease metadata is not aligned with test_data: "
+            f"{len(test_query_disease_ids)} vs {len(test_data)}"
+        )
+
     np.random.shuffle(train_data)
-    np.random.shuffle(test_data)
+    test_perm = np.random.permutation(len(test_data))
+    test_data = test_data[test_perm]
+    test_query_disease_ids = test_query_disease_ids[test_perm]
 
     # 注意：超图仅由训练集构建，避免测试 fold / 独立测试集信息泄露。
     hypergraph_train_pos = build_hypergraph(
@@ -92,6 +114,7 @@ def _build_fold_data(
         "test_pos_offset": test_pos_offset,
         "train_data": train_data,
         "test_data": test_data,
+        "test_query_disease_ids": test_query_disease_ids,
         "hypergraph_train_pos": hypergraph_train_pos,
         "hypergraph_train_neg": hypergraph_train_neg,
         "bin_edge_index": bin_edge_index,
@@ -149,10 +172,12 @@ def run_mode_experiment(
     disease_fea,
     config,
     wandb_run=None,
+    evaluation_label=None,
 ):
-    """运行单个模式的实验（triplets 全量训练 + drugbank 独立测试）。"""
+    """运行单个模式的一次 train-test 实验。"""
     print(f"{'='*60}")
-    print(f"开始模式: {current_mode[0]} 留出")
+    evaluation_label = evaluation_label or "DrugBank external test"
+    print(f"开始模式: {current_mode[0]} 留出 | {evaluation_label}")
     print(f"{'='*60}")
 
     total_ablations = len(config.graph_ablation_configs)
@@ -164,7 +189,7 @@ def run_mode_experiment(
         offset_edges = data_manager.get_offset_edges(global_edges, include_relations)
 
         if test_triplets_df.empty:
-            print("跳过：drugbank_triplets 为空")
+            print(f"跳过：{evaluation_label} 测试集为空")
             continue
 
         train_df = train_triplets_df
@@ -205,6 +230,7 @@ def run_mode_experiment(
             val_data=fold_data["test_data"],
             train_pos=fold_data["train_pos_offset"],
             val_pos=fold_data["test_pos_offset"],
+            val_query_disease_ids=fold_data["test_query_disease_ids"],
             hypergraph_pos=fold_data["hypergraph_train_pos"],
             hypergraph_neg=fold_data["hypergraph_train_neg"],
             bin_edge_index=fold_data["bin_edge_index"],
@@ -216,6 +242,8 @@ def run_mode_experiment(
             use_checkpoint=False,
             wandb_run=wandb_run,
             total_folds=1,
+            disease_offset=data_manager.disease_offset,
+            disease_idx_to_id={idx: raw_id for raw_id, idx in data_manager.disease_to_idx.items()},
         )
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
@@ -223,7 +251,7 @@ def run_mode_experiment(
         avg_metrics.update({f"{k}_std": 0.0 for k in test_metrics.keys()})
 
         print(f"{'='*60}")
-        print(f"{ablation_name} 独立测试集(DrugBank)结果:")
+        print(f"{ablation_name} {evaluation_label} 结果:")
         print(f"{'='*60}")
         _print_avg_metrics(avg_metrics)
 
@@ -252,6 +280,138 @@ def run_mode_experiment(
             results_dir=getattr(config, "results_dir", "results"),
         )
 
+
+
+def _normalise_raw_id(value):
+    """将 CSV 中的数值 ID 规范化为无 .0 的字符串。"""
+    if pd.isna(value):
+        return ""
+    try:
+        numeric = float(value)
+        if numeric.is_integer():
+            return str(int(numeric))
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def _load_radar_class_mapping(mapping_path, class_column):
+    path = Path(mapping_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Disease mapping file not found: {path}")
+    frame = pd.read_csv(path)
+    if "Disease_ID" not in frame.columns:
+        raise ValueError(f"Mapping file must contain Disease_ID: {path}")
+    if class_column not in frame.columns:
+        raise ValueError(
+            f"Mapping file does not contain {class_column!r}; "
+            f"available columns: {list(frame.columns)}"
+        )
+    result = {}
+    for _, row in frame.iterrows():
+        key = _normalise_raw_id(row["Disease_ID"])
+        category = str(row[class_column]).strip() if pd.notna(row[class_column]) else "Others"
+        if key:
+            result[key] = category or "Others"
+    return result
+
+
+def build_category_stratified_holdout(all_triplets_df, data_manager, config):
+    """从 triplets.csv 构造一次按雷达图类别分层的留出集。
+
+    该拆分只用于类别雷达图，使稀有类别在一次评估中仍有至少一个真实查询。
+    它不替代论文中的 DrugBank external test 结果。
+    """
+    if all_triplets_df.empty:
+        raise ValueError("triplets.csv is empty")
+
+    class_column = str(getattr(config, "radar_class_column", "Paper_Radar_Class_EN"))
+    class_by_raw_id = _load_radar_class_mapping(
+        getattr(config, "disease_mapping_file", "./resources/disease_icd11_mapping.csv"),
+        class_column,
+    )
+    idx_to_raw = {int(idx): raw_id for raw_id, idx in data_manager.disease_to_idx.items()}
+
+    work = all_triplets_df.copy().reset_index(drop=True)
+    categories = []
+    for local_id in work["Disease_ID"].tolist():
+        raw_id = _normalise_raw_id(idx_to_raw.get(int(local_id), local_id))
+        categories.append(class_by_raw_id.get(raw_id, "Others"))
+    work["_radar_category"] = categories
+
+    fraction = float(getattr(config, "radar_holdout_fraction", 0.20))
+    if not 0.0 < fraction < 1.0:
+        raise ValueError("radar_holdout_fraction must be between 0 and 1")
+    min_per_class = max(1, int(getattr(config, "radar_min_test_per_class", 1)))
+    seed = int(getattr(config, "random_state", 42))
+    rng = np.random.default_rng(seed)
+
+    preferred_order = list(getattr(config, "radar_class_order", []))
+    observed = work["_radar_category"].dropna().astype(str).unique().tolist()
+    category_order = [c for c in preferred_order if c in observed]
+    category_order += sorted(c for c in observed if c not in category_order)
+
+    test_indices = []
+    split_rows = []
+    for category in category_order:
+        indices = work.index[work["_radar_category"] == category].to_numpy(dtype=np.int64)
+        if len(indices) == 0:
+            continue
+        requested = max(min_per_class, int(np.ceil(len(indices) * fraction)))
+        # 类别只有 1 个三元组时允许该三元组进入测试；其它类别至少保留 1 条训练样本。
+        n_test = 1 if len(indices) == 1 else min(requested, len(indices) - 1)
+        selected = rng.choice(indices, size=n_test, replace=False)
+        test_indices.extend(int(x) for x in selected)
+        split_rows.append((category, len(indices), n_test))
+
+    test_indices = sorted(set(test_indices))
+    if not test_indices:
+        raise RuntimeError("No rows were selected for category-stratified holdout")
+
+    test_df = work.loc[test_indices].drop(columns=["_radar_category"]).reset_index(drop=True)
+    train_df = work.drop(index=test_indices).drop(columns=["_radar_category"]).reset_index(drop=True)
+
+    print("疾病类别分层留出统计:")
+    for category, total, test_count in split_rows:
+        print(f"  {category:<16} total={total:4d}, test={test_count:3d}, train={total-test_count:4d}")
+    print(f"  合计: train={len(train_df)}, test={len(test_df)}, seed={seed}")
+    return train_df, test_df
+
+
+def run_mode_category_stratified_holdout(
+    current_mode,
+    mode_index,
+    all_triplets_df,
+    global_pos_set,
+    global_edges,
+    data_manager,
+    drug_fea,
+    gene_fea,
+    disease_fea,
+    config,
+    wandb_run=None,
+):
+    """运行一次疾病类别分层留出，仅用于生成类别覆盖更完整的雷达图。"""
+    train_df, test_df = build_category_stratified_holdout(
+        all_triplets_df=all_triplets_df,
+        data_manager=data_manager,
+        config=config,
+    )
+    return run_mode_experiment(
+        current_mode=current_mode,
+        mode_index=mode_index,
+        train_triplets_df=train_df,
+        test_triplets_df=test_df,
+        global_pos_set=global_pos_set,
+        global_edges=global_edges,
+        data_manager=data_manager,
+        drug_fea=drug_fea,
+        gene_fea=gene_fea,
+        disease_fea=disease_fea,
+        config=config,
+        wandb_run=wandb_run,
+        evaluation_label="category-stratified holdout",
+    )
 
 def run_mode_cross_validation(
     current_mode,
@@ -332,6 +492,7 @@ def run_mode_cross_validation(
                 val_data=fold_data["test_data"],
                 train_pos=fold_data["train_pos_offset"],
                 val_pos=fold_data["test_pos_offset"],
+                val_query_disease_ids=fold_data["test_query_disease_ids"],
                 hypergraph_pos=fold_data["hypergraph_train_pos"],
                 hypergraph_neg=fold_data["hypergraph_train_neg"],
                 bin_edge_index=fold_data["bin_edge_index"],
@@ -343,6 +504,8 @@ def run_mode_cross_validation(
                 use_checkpoint=False,
                 wandb_run=wandb_run,
                 total_folds=n_splits,
+                disease_offset=data_manager.disease_offset,
+                disease_idx_to_id={idx: raw_id for raw_id, idx in data_manager.disease_to_idx.items()},
             )
             all_fold_metrics.append(fold_metrics)
 
