@@ -1,9 +1,11 @@
-numpy
-pandas
-scikit-learn
-matplotlib
-hydra-core
-omegaconf
-wandb
-torch
-torch-geometric
+# Python >=3.10. Install a CUDA-compatible torch build separately on your server.
+# These are supported API bounds, NOT a locally verified environment lock.
+torch>=2.2,<3
+torch-geometric>=2.5,<3
+numpy>=1.24,<2
+pandas>=2.0,<3
+scikit-learn>=1.3,<2
+hydra-core>=1.3,<1.4
+omegaconf>=2.3,<2.4
+matplotlib>=3.7,<4
+# Optional: wandb (only when use_wandb=true)

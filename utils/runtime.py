@@ -1,28 +1,33 @@
-"""
-Runtime helpers for consistent device and seed management.
-"""
+"""Device selection and reproducible random-number streams."""
 
+import os
 import random
 
 import numpy as np
 import torch
 
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def get_device(requested: str = "auto") -> torch.device:
+    if requested == "auto":
+        requested = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(requested)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested, but this PyTorch installation cannot access CUDA")
+    return device
 
 
-def get_device() -> torch.device:
-    """Return the shared runtime device used across modules."""
-    return DEVICE
-
-
-def set_global_seed(seed: int = 42) -> None:
-    """Set random seeds for reproducible experiments."""
+def set_global_seed(seed: int, deterministic: bool = True) -> None:
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
+    # Some PyG scatter operations have no deterministic CUDA kernel; warn explicitly.
+    torch.use_deterministic_algorithms(deterministic, warn_only=True)
+
+
+def derived_seed(seed: int, fold: int, stream: int) -> int:
+    return int(np.random.SeedSequence([seed, fold, stream]).generate_state(1)[0])

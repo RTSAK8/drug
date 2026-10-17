@@ -1,0 +1,4 @@
+# @package _global_
+experiment_name: no_residual
+hgnn_use_residual: false
+rgcn_use_residual: false

@@ -1,0 +1,3 @@
+# @package _global_
+experiment_name: no_protein_disease
+relations: [ppi, dpi, ddi]

@@ -1,0 +1,4 @@
+# @package _global_
+eval_protocol: independent_test
+validation_fraction: 0.15
+n_splits: 5

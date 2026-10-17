@@ -14,7 +14,7 @@ class Decoder(nn.Module):
     评估 AUC/AUPR/F1 时再在外部做 torch.sigmoid(logits)。
     """
 
-    def __init__(self, decoder_input_dim):
+    def __init__(self, decoder_input_dim, dropout=0.4):
         super(Decoder, self).__init__()
         self.fc1 = nn.Linear(decoder_input_dim, decoder_input_dim // 2)
         self.bn1 = nn.BatchNorm1d(decoder_input_dim // 2)
@@ -25,7 +25,7 @@ class Decoder(nn.Module):
         self.fc3 = nn.Linear(decoder_input_dim // 4, 1)
 
         self.act = nn.ReLU()
-        self.dropout = nn.Dropout(0.4)
+        self.dropout = nn.Dropout(dropout)
         self.reset_parameters()
 
     def reset_parameters(self):

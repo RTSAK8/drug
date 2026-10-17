@@ -5,7 +5,7 @@ from config import Config
 from utils.experiment import run_experiment
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="new_loss")
+@hydra.main(version_base="1.3", config_path="conf", config_name="default")
 def main(cfg: DictConfig):
     config = Config.from_omegaconf(cfg)
     run_experiment(config)

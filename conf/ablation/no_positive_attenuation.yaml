@@ -1,0 +1,3 @@
+# @package _global_
+experiment_name: no_positive_attenuation
+qfal_known_positive_masking: false

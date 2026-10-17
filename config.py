@@ -1,204 +1,141 @@
-"""
-配置文件 - 用于药物-基因-疾病超图对比学习
-"""
+"""Validated configuration for the paper model and controlled ablations."""
 
-import os
-from dataclasses import dataclass, field, fields
-from typing import Any, Dict, List, Mapping
+import math
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
 
 @dataclass
 class Config:
-    """实验配置类"""
-    
-    # 训练参数
+    experiment_name: str = "full"
+    data_dir: str = "dataset"
+    results_dir: str = "results"
+    device: str = "auto"
+    seeds: list[int] = field(default_factory=lambda: [42])
+    deterministic: bool = True
+    eval_protocol: str = "independent_test"
+    n_splits: int = 5
+    validation_fraction: float = 0.15
+    tasks: list[str] = field(default_factory=lambda: ["gene", "disease"])
     epochs: int = 1000
     learning_rate: float = 0.005
-    alpha: float = 0.4  # 兼容原始 BCE + QCCL 权重
+    weight_decay: float = 1e-4
+    eval_every: int = 10
+    early_stopping_patience: int = 20  # validation events, not epochs
+    early_stopping_min_delta: float = 1e-5
+    gradient_clip_norm: float = 5.0
     bce_weight: float = 0.3
     qfal_weight: float = 0.5
-    qccl_weight: float = 0.2
-    L2: float = 1e-4
-    loss_type: List[str] = field(default_factory=lambda: ["qccl"])  # 可选: qccl, qfal
-
-    # 数据参数
-    data_dir: str = "./dataset"
     neg_ratio: int = 3
-    max_attempts: int = 50
-    report_overlap_stats: bool = True
-    drop_test_overlap_with_train: bool = False
-    results_dir: str = "results"
-
-    # ICD-11 disease-category evaluation / radar plotting
-    disease_mapping_file: str = "./resources/disease_icd11_mapping.csv"
-    radar_class_column: str = "Radar_Class_EN"
-    radar_method_name: str = ""  # empty -> use wandb_name_prefix
-    save_category_metrics: bool = True
-    save_category_raw_records: bool = True
-
-    # 论文雷达图专用：从 triplets.csv 按疾病大类做一次分层留出。
-    # 该协议用于获得尽可能完整的疾病类别覆盖，不替代外部 DrugBank 测试结果。
-    radar_holdout_fraction: float = 0.20
-    radar_min_test_per_class: int = 1
-    radar_class_order: List[str] = field(
-        default_factory=lambda: [
-            "Infectious",
-            "Neoplasms",
-            "Hematol.",
-            "Endocrine",
-            "Psychiatr.",
-            "Neurol.",
-            "Ophthalm.",
-            "Cardiovasc.",
-            "Respiratory",
-            "Gastrointest.",
-            "Dermatol.",
-            "Musculosk.",
-            "Others",
-        ]
-    )
-
-    # 运行模式。默认同时运行 missing-gene 和 missing-disease；
-    # 单次疾病统计入口将其固定为 ["disease"]。
-    experiment_modes: List[str] = field(default_factory=lambda: ["gene", "disease"])
-
-    # 评估协议
-    # independent_test: triplets.csv 全量训练 + drugbank_triplets.csv 独立测试
-    # category_stratified_holdout: 按 Paper_Radar_Class_EN 从 triplets.csv 做一次分层留出
-    # cross_validation: 对 triplets.csv 做 K 折交叉验证
-    eval_protocol: str = "independent_test"
-
-    # 交叉验证参数
-    n_splits: int = 5
-    random_state: int = 42
-
-    # 模型参数
+    negative_filter_scope: str = "train_only"
     encoder_output_dim: int = 128
     hidden_dim: int = 512
-
-    # HGNN表达增强（方法5）
-    # 残差连接通常能提升稳定性
+    feature_dropout: float = 0.3
+    decoder_dropout: float = 0.4
+    use_hypergraph: bool = True
+    use_relational_graph: bool = True
     hgnn_use_residual: bool = True
-    # Jumping Knowledge: last | sum | mean | concat
-    hgnn_jk: str = "last"
-    # batch | layer
-    hgnn_norm: str = "batch"
-    # 训练时对超边incidence做dropout（0表示关闭）
-    hgnn_hyperedge_dropout: float = 0.0
-    hgnn_dropout: float = 0.4
-
-    # 二元边RGCN使用残差连接和dropout
     rgcn_use_residual: bool = True
+    hgnn_dropout: float = 0.4
     rgcn_dropout: float = 0.4
-
-    # 分支融合方式：gate(按比例加和) | concat(拼接后投影)
+    hgnn_hyperedge_dropout: float = 0.0
+    hypergraph_normalization: str = "symmetric"
     fusion_method: str = "concat"
-
-    # QCCL基础配置
-    qccl_temperature: float = 0.3
-    # <=0 时回退到 qccl_temperature
-    qccl_gene_query_temperature: float = -1.0
-    qccl_drug_query_temperature: float = -1.0
-    qccl_disease_query_temperature: float = -1.0
-    # symmetric | query_only | candidate_only | none
-    qccl_asymmetric_norm_mode: str = "symmetric"
-
-    # QCCL v2-lite: multi-positive 去假负 + hardness重加权
-    qccl_multi_positive: bool = False
-    qccl_hardness_reweight: bool = False
-    qccl_hardness_alpha: float = 1.0
-    qccl_hardness_temperature: float = 1.0
-    qccl_query_hardness_reweight: bool = False
-    qccl_query_hardness_alpha: float = 1.0
-    qccl_query_hardness_temperature: float = 1.0
-
-    # QCCL v2-standard: 三池负样本调度
-    qccl_three_pool_schedule: bool = False
-    qccl_pool_easy_quantile: float = 0.33
-    qccl_pool_hard_quantile: float = 0.66
-    qccl_pool_start_weights: List[float] = field(default_factory=lambda: [1.25, 1.0, 0.75])
-    qccl_pool_end_weights: List[float] = field(default_factory=lambda: [0.75, 1.0, 1.25])
-
-    # QCCL v2-advanced: memory queue
-    qccl_memory_queue: bool = False
-    qccl_memory_queue_size: int = 0
-    qccl_memory_queue_warmup_progress: float = 0.0
-    qccl_memory_queue_negatives_per_query: int = 0
-
-    # QFAL: Query-conditioned False-negative-aware Listwise Ranking Loss
+    relations: list[str] = field(default_factory=lambda: ["ppi", "dpi", "ddi", "protein_disease"])
+    feature_dims: dict[str, int] = field(default_factory=lambda: {"drug": 768, "gene": 1024, "disease": 768})
     qfal_num_negatives: int = 64
     qfal_temperature: float = 0.2
     qfal_known_positive_masking: bool = True
     qfal_false_negative_weight: float = 0.05
     qfal_self_adversarial: bool = True
     qfal_adversarial_temperature: float = 1.0
-    qfal_max_queries: int = 2048
-
-    # QCCL模块结构（方便消融）
-    qccl_cond_dim_ratio: float = 0.5
-    qccl_num_layers: int = 2
-    qccl_query_dropout: float = 0.3
-    qccl_film_layer_norm: bool = False
-
-    # wandb配置
-    use_wandb: bool = True
-    wandb_project: str = "Drug Effect Prediction"
+    qfal_max_queries: int = 256  # unique queries per task/step; 0 = all
+    ranking_query_batch_size: int = 16
+    ranking_candidate_batch_size: int = 128
+    prediction_batch_size: int = 8192
+    ranking_tie_policy: str = "average"
+    hit_k: list[int] = field(default_factory=lambda: [1, 3, 5])
+    recall_k: list[int] = field(default_factory=lambda: [1, 5, 10])
+    use_wandb: bool = False
+    wandb_project: str = "drug-triplet-completion"
     wandb_entity: str = ""
-    wandb_name_prefix: str = "XXX"
-    wandb_run_index: int = 1
-
-    # 消融实验配置
-    graph_ablation_configs: Dict[str, List[str]] = field(
-        default_factory=lambda: {
-            # 'OnlyTriplets': [],  # 只有三元组
-            # 'WithPPI': ['ppi'],  # 包含PPI
-            # 'WithDPI': ['dpi'],  # 包含DPI
-            # 'WithDDI': ['ddi'],  # 包含DDI
-            "WithoutGeneHyperedges": ["ppi", "dpi", "ddi", "protein_disease"],  # 不包含基因超边
-            # 'AllRelations': ['ppi', 'dpi', 'ddi', 'gene_hyperedges'],  # 所有关系
-        }
-    )
 
     @classmethod
-    def from_omegaconf(cls, cfg: Any = None) -> "Config":
-        """将Hydra/OmegaConf配置安全转换为Config对象。"""
-        if cfg is None:
-            return cls()
-
-        if isinstance(cfg, DictConfig):
-            cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-        elif isinstance(cfg, Mapping):
-            cfg_dict = dict(cfg)
-        else:
-            raise TypeError("cfg must be a DictConfig or mapping")
-
-        if not isinstance(cfg_dict, dict):
-            raise TypeError("resolved config must be a dictionary")
-
-        cfg_dict.pop("hydra", None)
-
-        valid_fields = {item.name for item in fields(cls)}
-        unknown_keys = sorted(set(cfg_dict.keys()) - valid_fields)
-        if unknown_keys:
-            raise ValueError(f"Unknown config keys: {unknown_keys}")
-
-        init_kwargs = {k: v for k, v in cfg_dict.items() if k in valid_fields}
-        return cls(**init_kwargs)
+    def from_omegaconf(cls, cfg: Any) -> "Config":
+        values = OmegaConf.to_container(cfg, resolve=True) if isinstance(cfg, DictConfig) else dict(cfg)
+        if not isinstance(values, dict):
+            raise TypeError("Configuration must be a mapping")
+        values.pop("hydra", None)
+        unknown = set(values) - {f.name for f in fields(cls)}
+        if unknown:
+            raise ValueError(f"Unknown/retired config keys: {sorted(unknown)}; see README.md")
+        return cls(**values)
 
     def __post_init__(self):
-        # 核心数据文件
-        self.drug_file = os.path.join(self.data_dir, "drug_embeddings.csv")
-        self.gene_file = os.path.join(self.data_dir, "gene_embeddings.csv")
-        self.disease_file = os.path.join(self.data_dir, "disease_embeddings.csv")
-        self.triplets_file = os.path.join(self.data_dir, "triplets.csv")
-        # 独立测试集（DrugBank）
-        self.drugbank_triplets_file = os.path.join(self.data_dir, "drugbank_triplets.csv")
+        for key in ("deterministic", "use_hypergraph", "use_relational_graph", "hgnn_use_residual",
+                    "rgcn_use_residual", "qfal_known_positive_masking", "qfal_self_adversarial", "use_wandb"):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError(f"{key} must be a YAML boolean, not a string or number")
+        for key, allowed in {
+            "eval_protocol": {"independent_test", "cross_validation"},
+            "negative_filter_scope": {"train_only", "all_known"},
+            "fusion_method": {"concat", "gate"},
+            "hypergraph_normalization": {"symmetric", "random_walk"},
+            "ranking_tie_policy": {"average", "optimistic", "pessimistic"},
+        }.items():
+            if getattr(self, key) not in allowed:
+                raise ValueError(f"{key} must be one of {sorted(allowed)}")
+        if not self.tasks or len(set(self.tasks)) != len(self.tasks) or set(self.tasks) - {"gene", "disease"}:
+            raise ValueError("tasks must contain unique gene/disease entries")
+        if not self.seeds or any(type(s) is not int or not 0 <= s < 2**32 for s in self.seeds):
+            raise ValueError("seeds must contain integers in [0, 2**32)")
+        if len(set(self.seeds)) != len(self.seeds):
+            raise ValueError("Duplicate seeds are not independent repeats")
+        if not 0 < self.validation_fraction < 0.5:
+            raise ValueError("validation_fraction must be in (0, 0.5)")
+        for key in ("epochs", "eval_every", "early_stopping_patience", "neg_ratio", "encoder_output_dim",
+                    "qfal_num_negatives", "ranking_query_batch_size", "ranking_candidate_batch_size", "prediction_batch_size"):
+            if type(getattr(self, key)) is not int or getattr(self, key) < 1:
+                raise ValueError(f"{key} must be a positive integer")
+        if type(self.n_splits) is not int or self.n_splits < 2:
+            raise ValueError("n_splits must be an integer >= 2")
+        if type(self.hidden_dim) is not int or self.hidden_dim < 4 or self.hidden_dim % 4:
+            raise ValueError("hidden_dim must be positive and divisible by 4")
+        for key in ("feature_dropout", "decoder_dropout", "hgnn_dropout", "rgcn_dropout", "hgnn_hyperedge_dropout"):
+            if not 0 <= getattr(self, key) < 1:
+                raise ValueError(f"{key} must be in [0, 1)")
+        for key in ("learning_rate", "qfal_temperature", "qfal_adversarial_temperature"):
+            value = getattr(self, key)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{key} must be finite and positive")
+        for key in ("bce_weight", "qfal_weight", "weight_decay", "gradient_clip_norm", "early_stopping_min_delta"):
+            value = getattr(self, key)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{key} must be finite and nonnegative")
+        if self.bce_weight + self.qfal_weight <= 0:
+            raise ValueError("At least one training loss must be active")
+        if type(self.qfal_max_queries) is not int or self.qfal_max_queries < 0:
+            raise ValueError("qfal_max_queries must be a nonnegative integer")
+        if not 0 <= self.qfal_false_negative_weight < 1:
+            raise ValueError("qfal_false_negative_weight must be in [0, 1)")
+        if set(self.relations) - {"ppi", "dpi", "ddi", "protein_disease"} or len(set(self.relations)) != len(self.relations):
+            raise ValueError("Unknown or duplicate auxiliary relations")
+        if self.use_relational_graph and not self.relations:
+            raise ValueError("A relational branch requires at least one relation")
+        if set(self.feature_dims) != {"drug", "gene", "disease"} or any(type(v) is not int or v < 1 for v in self.feature_dims.values()):
+            raise ValueError("feature_dims must specify positive drug/gene/disease dimensions")
+        for values in (self.hit_k, self.recall_k):
+            if not values or any(type(k) is not int or k < 1 for k in values) or len(set(values)) != len(values):
+                raise ValueError("Metric cutoffs must be unique positive integers")
+        if self.eval_protocol == "independent_test" and self.negative_filter_scope != "train_only":
+            raise ValueError("Independent test requires train_only negative filtering")
+        root = Path(__file__).resolve().parent
+        for key in ("data_dir", "results_dir"):
+            value = Path(getattr(self, key)).expanduser()
+            setattr(self, key, str(value.resolve() if value.is_absolute() else (root / value).resolve()))
 
-        # PrimeKG关系文件
-        self.ppi_file = os.path.join(self.data_dir, "ppi.csv")
-        self.dpi_file = os.path.join(self.data_dir, "drug_protein.csv")
-        self.ddi_file = os.path.join(self.data_dir, "drug_drug.csv")
-        self.protein_disease_file = os.path.join(self.data_dir, "protein_disease.csv")
-        self.gene_hyperedges_file = os.path.join(self.data_dir, "pathway_gene.csv")
+    def to_dict(self) -> dict:
+        return asdict(self)

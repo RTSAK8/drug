@@ -1,344 +1,82 @@
-import os
+"""Fit on training data; select/checkpoint/calibrate exclusively on inner validation."""
+
+import logging
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
-import torch.nn as nn
 
-from config import Config
-from models import BioEncoder, HgnnEncoder, RelationalGraphEncoder, Decoder, HGNN
-from utils.runtime import get_device
-from utils.metrics import calculate_ranking_metrics, metrics_graph_with_hits
-from utils.category_metrics import save_category_metrics_for_fold
-from utils.training import train_step, validate_step
+from models import HGNN
+from utils.preprocessing import answer_map
+from utils.results import save_evaluation, write_json
+from utils.runtime import derived_seed, set_global_seed
+from utils.training import evaluate, train_step
 
-
-# 设置设备
-device = get_device()
+LOG = logging.getLogger(__name__)
 
 
-def train_fold_model(
-    current_mode,
-    mode_index: int,
-    total_ablations: int,
-    ablation_index: int,
-    ablation_name: str,
-    fold: int,
-    train_data: np.ndarray,
-    val_data: np.ndarray,
-    train_pos: np.ndarray,
-    val_pos: np.ndarray,
-    hypergraph_pos: torch.Tensor,
-    hypergraph_neg: torch.Tensor,
-    bin_edge_index: torch.Tensor,
-    bin_edge_type: torch.Tensor,
-    drug_fea: torch.Tensor,
-    gene_fea: torch.Tensor,
-    disease_fea: torch.Tensor,
-    config: Config,
-    use_checkpoint: bool = True,
-    wandb_run=None,
-    total_folds: int = 1,
-    disease_offset: int = 0,
-    disease_idx_to_id=None,
-    val_query_disease_ids=None,
-):
-    """训练模型，并在给定评估集上评估（use_checkpoint=False 时不做训练中验证/选最优）"""
-
-    bio_encoder = BioEncoder(dim_drug=drug_fea.shape[1], dim_gene=gene_fea.shape[1], dim_disease=disease_fea.shape[1], encoder_output_dim=config.encoder_output_dim)
-
-    graph_encoder = HgnnEncoder(
-        in_channels=config.encoder_output_dim,
-        dim_1=config.hidden_dim,
-        use_residual=config.hgnn_use_residual,
-        jk=config.hgnn_jk,
-        norm=config.hgnn_norm,
-        hyperedge_dropout=config.hgnn_hyperedge_dropout,
-        dropout=config.hgnn_dropout,
-    )
-
-    binary_graph_encoder = RelationalGraphEncoder(
-        in_channels=config.encoder_output_dim,
-        dim_1=config.hidden_dim,
-        num_relations=4,
-        use_residual=getattr(config, "rgcn_use_residual", False),
-        dropout=getattr(config, "rgcn_dropout", 0.4),
-    )
-
-    decoder_input_dim = (config.hidden_dim // 4) * 3
-    decoder = Decoder(decoder_input_dim)
-
-    pool_start_weights = getattr(config, "qccl_pool_start_weights", [1.0, 1.0, 1.0])
-    pool_end_weights = getattr(config, "qccl_pool_end_weights", [1.0, 1.0, 1.0])
-    start_mid_weight = float(pool_start_weights[1]) if isinstance(pool_start_weights, (list, tuple)) and len(pool_start_weights) > 1 else 1.0
-    end_mid_weight = float(pool_end_weights[1]) if isinstance(pool_end_weights, (list, tuple)) and len(pool_end_weights) > 1 else 1.0
-    start_late_weight = float(pool_start_weights[2]) if isinstance(pool_start_weights, (list, tuple)) and len(pool_start_weights) > 2 else 1.0
-    end_late_weight = float(pool_end_weights[2]) if isinstance(pool_end_weights, (list, tuple)) and len(pool_end_weights) > 2 else 1.0
-
-    qccl_config = {
-        "temperature": float(getattr(config, "qccl_temperature", 0.3)),
-        "gene_query_temperature": None if float(getattr(config, "qccl_gene_query_temperature", -1.0)) <= 0 else float(getattr(config, "qccl_gene_query_temperature", -1.0)),
-        "drug_query_temperature": None if float(getattr(config, "qccl_drug_query_temperature", -1.0)) <= 0 else float(getattr(config, "qccl_drug_query_temperature", -1.0)),
-        "disease_query_temperature": None if float(getattr(config, "qccl_disease_query_temperature", -1.0)) <= 0 else float(getattr(config, "qccl_disease_query_temperature", -1.0)),
-        "norm_mode": str(getattr(config, "qccl_asymmetric_norm_mode", "symmetric")),
-        "multi_positive_mode": "group" if bool(getattr(config, "qccl_multi_positive", False)) else "strict",
-        "suppress_false_negatives": bool(getattr(config, "qccl_multi_positive", False)),
-        "use_hardness_reweight": bool(getattr(config, "qccl_hardness_reweight", False)),
-        "hardness_alpha": float(getattr(config, "qccl_hardness_alpha", 1.0)),
-        "hardness_tau": float(getattr(config, "qccl_hardness_temperature", 1.0)),
-        "use_query_hardness_reweight": bool(getattr(config, "qccl_query_hardness_reweight", False)),
-        "query_hardness_alpha": float(getattr(config, "qccl_query_hardness_alpha", 1.0)),
-        "query_hardness_tau": float(getattr(config, "qccl_query_hardness_temperature", 1.0)),
-        "enable_three_pool_schedule": bool(getattr(config, "qccl_three_pool_schedule", False)),
-        "pool_schedule_start": float(getattr(config, "qccl_pool_easy_quantile", 0.33)),
-        "pool_schedule_end": float(getattr(config, "qccl_pool_hard_quantile", 0.66)),
-        "pool_schedule_mid_weight": max(0.0, end_mid_weight - start_mid_weight),
-        "pool_schedule_late_weight": max(0.0, end_late_weight - start_late_weight),
-        "enable_memory_queue": bool(getattr(config, "qccl_memory_queue", False)),
-        "memory_queue_size": int(getattr(config, "qccl_memory_queue_size", 0)),
-        "memory_queue_warmup_steps": int(round(max(0.0, min(1.0, float(getattr(config, "qccl_memory_queue_warmup_progress", 0.0)))) * max(1, int(config.epochs)))),
-        "memory_queue_negatives_per_query": int(getattr(config, "qccl_memory_queue_negatives_per_query", 0)),
-        "memory_queue_unique_only": True,
-        "cond_dim_ratio": float(getattr(config, "qccl_cond_dim_ratio", 0.5)),
-        "num_layers": int(getattr(config, "qccl_num_layers", 2)),
-        "query_dropout": float(getattr(config, "qccl_query_dropout", 0.3)),
-        "film_layer_norm": bool(getattr(config, "qccl_film_layer_norm", False)),
-    }
-
-    qfal_config = {
-        "num_negatives": int(getattr(config, "qfal_num_negatives", 64)),
-        "temperature": float(getattr(config, "qfal_temperature", 0.2)),
-        "false_negative_weight": float(getattr(config, "qfal_false_negative_weight", 0.05)),
-        "known_positive_masking": bool(getattr(config, "qfal_known_positive_masking", True)),
-        "self_adversarial": bool(getattr(config, "qfal_self_adversarial", True)),
-        "adversarial_temperature": float(getattr(config, "qfal_adversarial_temperature", 1.0)),
-        "max_queries": int(getattr(config, "qfal_max_queries", 2048)),
-    }
-
-    model = HGNN(
-        bio_encoder=bio_encoder,
-        graph_encoder=graph_encoder,
-        binary_graph_encoder=binary_graph_encoder,
-        decoder=decoder,
-        out_channels=config.hidden_dim // 4,
-        replace_dims=current_mode,
-        loss_type=config.loss_type,
-        fusion_method=getattr(config, "fusion_method", "gate"),
-        qccl_config=qccl_config,
-        qfal_config=qfal_config,
-    ).to(device)
-
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.L2)
-
-    best_mrr = 0
-    model_path = f"best_model_{current_mode[0]}_{ablation_name}_fold{fold}.pth"
-
-    for epoch in range(config.epochs):
-        global_step = (
-            ((mode_index * total_ablations + ablation_index) * max(int(total_folds), 1) + int(fold))
-            * config.epochs
-            + epoch
-            + 1
-        )
-        epoch_progress = float(epoch) / float(max(config.epochs - 1, 1))
-
-        train_metrics = train_step(
-            model=model,
-            optimizer=optimizer,
-            loss_func=criterion,
-            drug_emb=drug_fea,
-            gene_emb=gene_fea,
-            disease_emb=disease_fea,
-            hp_pos=hypergraph_pos,
-            hp_neg=hypergraph_neg,
-            bin_edge_index=bin_edge_index,
-            bin_edge_type=bin_edge_type,
-            train_data=train_data,
-            train_pos=train_pos,
-            epoch=epoch,
-            epoch_progress=epoch_progress,
-            alpha=config.alpha,
-            bce_weight=float(getattr(config, "bce_weight", 0.3)),
-            qfal_weight=float(getattr(config, "qfal_weight", 0.5)),
-            qccl_weight=float(getattr(config, "qccl_weight", 0.2)),
-        )
-
+def fit_model(config, features, graph, train_positive, validation_positive,
+              train_labelled, validation_labelled, candidates, folder: Path,
+              seed: int, fold: int, wandb_run=None):
+    # No test triplets or test labels are accepted by this function.
+    model_seed = derived_seed(seed, fold, 50)
+    set_global_seed(model_seed, config.deterministic)
+    model = HGNN(config, {k: int(v.shape[1]) for k, v in features.items()}).to(next(iter(features.values())).device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    device = next(model.parameters()).device
+    train_tensors = {task: torch.as_tensor(rows, dtype=torch.long, device=device) for task, rows in train_labelled.items()}
+    known = {task: answer_map(train_positive, task) for task in config.tasks}
+    validation_filter = np.concatenate([train_positive, validation_positive])
+    rng = np.random.default_rng(derived_seed(seed, fold, 51))
+    best_score, best_epoch, stale = -float("inf"), 0, 0
+    history = []
+    checkpoint_path = folder / "best_model.pt"
+    for epoch in range(1, config.epochs + 1):
+        training = train_step(model, optimizer, features, graph, train_tensors, known, candidates, config, rng)
+        record = {"epoch": epoch, **training}
+        if epoch == 1 or epoch % config.eval_every == 0 or epoch == config.epochs:
+            validation, _, _ = evaluate(model, features, graph, validation_labelled, validation_positive,
+                                        validation_filter, candidates, config)
+            score = float(np.mean([validation[t]["mrr_filtered_query_macro"] for t in config.tasks]))
+            if not np.isfinite(score):
+                raise FloatingPointError("Validation selection metric is not finite")
+            record["validation_selection_mrr"] = score
+            for task, metrics in validation.items():
+                record.update({f"validation/{task}/{key}": value for key, value in metrics.items()})
+            if score > best_score + config.early_stopping_min_delta:
+                best_score, best_epoch, stale = score, epoch, 0
+                temporary = checkpoint_path.with_suffix(".tmp")
+                torch.save({"model_state": model.state_dict(), "epoch": epoch, "selection_score": score,
+                            "selection_metric": "mean_task_filtered_query_macro_mrr", "config": config.to_dict(),
+                            "seed": seed, "model_seed": model_seed, "fold": fold}, temporary)
+                temporary.replace(checkpoint_path)
+            else:
+                stale += 1
+            LOG.info("Epoch %d loss=%.5f val_macro_MRR=%.5f best_epoch=%d patience=%d/%d",
+                     epoch, training["loss"], score, best_epoch, stale, config.early_stopping_patience)
+        history.append(record)
         if wandb_run is not None:
-            mode_key = current_mode[0]
-            wandb_run.log(
-                {
-                    f"{mode_key}/train_total_loss": float(train_metrics["loss"]),
-                    f"{mode_key}/train_main_loss": float(train_metrics["main_loss"]),
-                    f"{mode_key}/train_cl_loss": float(train_metrics["cl_loss"]),
-                    f"{mode_key}/train_qfal_loss": float(train_metrics.get("qfal_loss", 0.0)),
-                    f"{mode_key}/train_mrr": float(train_metrics["mrr"]),
-                    f"{mode_key}/train_hit@1": float(train_metrics["hit@1"]),
-                    f"{mode_key}/train_hit@3": float(train_metrics["hit@3"]),
-                    f"{mode_key}/train_hit@5": float(train_metrics["hit@5"]),
-                    f"{mode_key}/train_recall@1": float(train_metrics["recall@1"]),
-                    f"{mode_key}/train_recall@5": float(train_metrics["recall@5"]),
-                    f"{mode_key}/train_recall@10": float(train_metrics["recall@10"]),
-                    f"{mode_key}/train_recall@50": float(train_metrics["recall@50"]),
-                    f"{mode_key}/train_recall@100": float(train_metrics["recall@100"]),
-                    f"{mode_key}/train_epoch": int(epoch + 1),
-                },
-                step=global_step,
-                commit=False,
-            )
-
-        if use_checkpoint and (epoch % 10 == 0 or epoch == config.epochs - 1):
-            auc, aupr, f1_score, threshold, mrr, hits = validate_step(
-                model=model,
-                drug_emb=drug_fea,
-                gene_emb=gene_fea,
-                disease_emb=disease_fea,
-                hp_pos=hypergraph_pos,
-                hp_neg=hypergraph_neg,
-                bin_edge_index=bin_edge_index,
-                bin_edge_type=bin_edge_type,
-                val_data=val_data,
-                val_pos=val_pos,
-                epoch_progress=epoch_progress,
-            )
-
-            print(
-                f"Epoch {epoch+1:03d} | Val: "
-                f"AUC={auc:.4f}, AUPR={aupr:.4f}, F1={f1_score:.4f}, "
-                f"thresh={threshold:.4f}, MRR={mrr:.4f}, "
-                f"Hit@1={hits.get('hit@1', 0.0):.4f}, Hit@5={hits.get('hit@5', 0.0):.4f}, "
-                f"Recall@10={hits.get('recall@10', 0.0):.4f}, Recall@100={hits.get('recall@100', 0.0):.4f}"
-            )
-
-            if mrr > best_mrr:
-                best_mrr = mrr
-                torch.save(model.state_dict(), model_path)
-
-            if wandb_run is not None:
-                mode_key = current_mode[0]
-                wandb_run.log(
-                    {
-                        f"{mode_key}/val_epoch": int(epoch + 1),
-                        f"{mode_key}/val/auc": float(auc),
-                        f"{mode_key}/val/aupr": float(aupr),
-                        f"{mode_key}/val/f1_score": float(f1_score),
-                        f"{mode_key}/val/threshold": float(threshold),
-                        f"{mode_key}/val/mrr": float(mrr),
-                        f"{mode_key}/val/hit@1": float(hits.get("hit@1", 0.0)),
-                        f"{mode_key}/val/hit@3": float(hits.get("hit@3", 0.0)),
-                        f"{mode_key}/val/hit@5": float(hits.get("hit@5", 0.0)),
-                        f"{mode_key}/val/recall@1": float(hits.get("recall@1", 0.0)),
-                        f"{mode_key}/val/recall@5": float(hits.get("recall@5", 0.0)),
-                        f"{mode_key}/val/recall@10": float(hits.get("recall@10", 0.0)),
-                        f"{mode_key}/val/recall@50": float(hits.get("recall@50", 0.0)),
-                        f"{mode_key}/val/recall@100": float(hits.get("recall@100", 0.0)),
-                    },
-                    step=global_step,
-                )
-
-            torch.cuda.empty_cache()
-
-    if use_checkpoint and os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
-
-    with torch.no_grad():
-        threshold_source = "eval_best_f1"
-        calibrated_threshold = None
-
-        if not use_checkpoint:
-            # 独立测试 / 交叉验证测试 fold 模式下，阈值仅用训练集校准，避免在评估集上选阈值产生乐观偏差
-            train_data_tensor = torch.from_numpy(train_data).long().to(device)
-            train_pos_tensor = torch.from_numpy(train_pos).long().to(device)
-
-            train_logits, _, _, _, _ = model(
-                drug_fea,
-                gene_fea,
-                disease_fea,
-                hypergraph_pos,
-                hypergraph_neg,
-                train_data_tensor[:, 0],
-                train_data_tensor[:, 1],
-                train_data_tensor[:, 2],
-                train_pos_tensor[:, 0],
-                train_pos_tensor[:, 1],
-                train_pos_tensor[:, 2],
-                bin_edge_index,
-                bin_edge_type,
-                1.0,
-            )
-
-            train_y_true = train_data[:, 3]
-            train_y_pred = torch.sigmoid(train_logits).cpu().numpy()
-            _, _, _, calibrated_threshold, _ = metrics_graph_with_hits(train_y_true, train_y_pred)
-            threshold_source = "train_best_f1"
-
-        val_data_tensor = torch.from_numpy(val_data).long().to(device)
-        val_pos_tensor = torch.from_numpy(val_pos).long().to(device)
-
-        pred_logits, _, _, mrr, ranks = model(
-            drug_fea,
-            gene_fea,
-            disease_fea,
-            hypergraph_pos,
-            hypergraph_neg,
-            val_data_tensor[:, 0],
-            val_data_tensor[:, 1],
-            val_data_tensor[:, 2],
-            val_pos_tensor[:, 0],
-            val_pos_tensor[:, 1],
-            val_pos_tensor[:, 2],
-            bin_edge_index,
-            bin_edge_type,
-            1.0,
-        )
-
-        y_true = val_data[:, 3]
-        y_pred = torch.sigmoid(pred_logits).cpu().numpy()
-
-        auc, aupr, best_f1_score, threshold, _ = metrics_graph_with_hits(y_true, y_pred, fixed_threshold=calibrated_threshold)
-        ranking_metrics = calculate_ranking_metrics(ranks)
-
-        final_metrics = {
-            "auc": auc,
-            "aupr": aupr,
-            "f1_score": best_f1_score,
-            "threshold": threshold,
-            "mrr": float(mrr),
-        }
-        final_metrics.update({metric_name: float(metric_value) for metric_name, metric_value in ranking_metrics.items()})
-
-        if bool(getattr(config, "save_category_metrics", True)) and disease_idx_to_id is not None:
-            radar_method_name = str(getattr(config, "radar_method_name", "")).strip()
-            if not radar_method_name:
-                radar_method_name = str(getattr(config, "wandb_name_prefix", ablation_name)).strip()
-            save_category_metrics_for_fold(
-                val_data=val_data,
-                y_pred=y_pred,
-                val_pos=val_pos,
-                ranks=ranks,
-                query_disease_ids=val_query_disease_ids,
-                threshold=threshold,
-                disease_offset=disease_offset,
-                disease_idx_to_id=disease_idx_to_id,
-                mapping_path=getattr(config, "disease_mapping_file", "./resources/disease_icd11_mapping.csv"),
-                class_column=getattr(config, "radar_class_column", "Radar_Class_EN"),
-                results_dir=getattr(config, "results_dir", "results"),
-                method=radar_method_name,
-                protocol=getattr(config, "eval_protocol", "unknown"),
-                mode=current_mode[0],
-                ablation=ablation_name,
-                fold=fold,
-                run_index=int(getattr(config, "wandb_run_index", 0)),
-                random_state=getattr(config, "random_state", None),
-                save_raw_records=bool(getattr(config, "save_category_raw_records", False)),
-            )
-
-        print(f"  threshold_source: {threshold_source}")
-
-        print(f"\n最终测试结果:")
-        for metric, value in final_metrics.items():
-            print(f"  {metric}: {value:.4f}")
-
-    if use_checkpoint and os.path.exists(model_path):
-        os.remove(model_path)
-
-    return final_metrics
+            wandb_run.log(record, step=epoch)
+        if "validation_selection_mrr" in record:
+            pd.DataFrame(history).to_csv(folder / "training_history.csv", index=False)
+        if stale >= config.early_stopping_patience:
+            break
+    if not checkpoint_path.is_file():
+        raise RuntimeError("Training finished without a finite validation checkpoint")
+    # Load only a checkpoint created by this run. No arbitrary pickle objects are needed.
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+    validation, artifacts, thresholds = evaluate(model, features, graph, validation_labelled,
+                                                 validation_positive, validation_filter, candidates, config)
+    save_evaluation(folder, "validation", validation, artifacts)
+    write_json(folder / "thresholds.json", {"source": "inner_validation_best_f1", "logit_thresholds": thresholds})
+    checkpoint["thresholds_logit"] = thresholds
+    temporary = checkpoint_path.with_suffix(".tmp")
+    torch.save(checkpoint, temporary)
+    temporary.replace(checkpoint_path)
+    write_json(folder / "training_summary.json", {"best_epoch": best_epoch, "epochs_completed": epoch,
+               "best_validation_mrr": best_score, "model_seed": model_seed,
+               "selection_metric": "mean_task_filtered_query_macro_mrr", "early_stopped": epoch < config.epochs})
+    return model, thresholds
