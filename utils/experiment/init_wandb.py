@@ -9,5 +9,6 @@ def init_wandb_run(config, run_id: str, seed: int, fold: int):
     except ImportError as exc:
         raise RuntimeError("use_wandb=true requires wandb; install it or disable logging") from exc
     return wandb.init(project=config.wandb_project, entity=config.wandb_entity or None,
+                      id=f"{run_id}-{seed}-{fold}", resume="allow" if config.resume_from else "never",
                       name=f"{config.experiment_name}_{seed}_fold{fold}_{run_id}",
                       group=run_id, config={**config.to_dict(), "seed": seed, "fold": fold}, reinit=True)

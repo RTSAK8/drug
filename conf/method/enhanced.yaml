@@ -1,0 +1,9 @@
+# @package _global_
+# Candidate enhanced baseline, NOT experimentally established best settings.
+# Keeps the same splits, BCE samples, QFAL formula and optimizer-update budget.
+method_name: enhanced
+decoder_normalization: layer
+feature_residual: true
+qfal_query_sampling: cycle
+learning_rate: 0.001
+scheduler: plateau

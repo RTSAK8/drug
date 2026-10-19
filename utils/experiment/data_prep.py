@@ -34,6 +34,12 @@ def prepare_fold(data, config, seed, fold, outer_train, test_positive, folder):
     all_known = sets["train"] | sets["validation"] | sets["test"]
     negatives = {split: {} for split in positives}
     statistics = {}
+
+    def partition_args(split):
+        if config.negative_sampling_strategy == "partitioned":
+            return {"partition": split, "partition_seed": derived_seed(seed, fold, 40)}
+        return {}
+
     # Train-only is the strict external protocol. Global known-positive filtering is
     # optional only in CV, explicitly recorded, and must never be confused with external independence.
     train_exclude = sets["train"] if config.negative_filter_scope == "train_only" else all_known
@@ -41,6 +47,7 @@ def prepare_fold(data, config, seed, fold, outer_train, test_positive, folder):
         negatives["train"][task], statistics[f"train_{task}"] = sample_negatives(
             train_positive, data.candidates[task], train_exclude, task, config.neg_ratio,
             np.random.default_rng(derived_seed(seed, fold, 10+task_index)),
+            **partition_args("train"),
         )
     all_train_negative = set().union(*(triplet_set(n) for n in negatives["train"].values()))
     # Inner validation construction does not consult outer/external test positives.
@@ -51,6 +58,7 @@ def prepare_fold(data, config, seed, fold, outer_train, test_positive, folder):
         negatives["validation"][task], statistics[f"validation_{task}"] = sample_negatives(
             validation_positive, data.candidates[task], validation_exclude, task, config.neg_ratio,
             np.random.default_rng(derived_seed(seed, fold, 20+task_index)),
+            **partition_args("validation"),
         )
     all_validation_negative = set().union(*(triplet_set(n) for n in negatives["validation"].values()))
     test_exclude = all_known | all_train_negative | all_validation_negative
@@ -58,6 +66,7 @@ def prepare_fold(data, config, seed, fold, outer_train, test_positive, folder):
         negatives["test"][task], statistics[f"test_{task}"] = sample_negatives(
             test_positive, data.candidates[task], test_exclude, task, config.neg_ratio,
             np.random.default_rng(derived_seed(seed, fold, 30+task_index)),
+            **partition_args("test"),
         )
     all_test_negative = set().union(*(triplet_set(n) for n in negatives["test"].values()))
     if all_train_negative & all_validation_negative or all_train_negative & all_test_negative or all_validation_negative & all_test_negative:

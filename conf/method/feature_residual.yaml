@@ -1,0 +1,3 @@
+# @package _global_
+method_name: feature_residual
+feature_residual: true

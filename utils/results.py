@@ -37,16 +37,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def environment_info() -> dict:
+def environment_info(device=None) -> dict:
     versions = {}
     for package in ("torch", "torch-geometric", "numpy", "pandas", "scikit-learn", "hydra-core", "omegaconf", "wandb"):
         try:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
+    selected = torch.device(device) if device is not None else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     return {"python": platform.python_version(), "platform": platform.platform(), "packages": versions,
             "cuda_build": torch.version.cuda, "cuda_available": torch.cuda.is_available(),
-            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}
+            "gpu": torch.cuda.get_device_name(selected) if selected.type == "cuda" else None,
+            "selected_device": str(selected)}
 
 
 def save_evaluation(folder: Path, split: str, metrics: dict, artifacts: dict) -> None:
@@ -66,6 +68,14 @@ def save_aggregate(folder: Path, rows: list[dict]) -> None:
     frame = pd.DataFrame(rows)
     frame.to_csv(folder / "metrics_long.csv", index=False)
     groups = ["experiment", "protocol", "seed", "task", "metric"]
+    # Counts and calibration thresholds are metadata, not performance scores.
+    count_mask = frame.metric.str.endswith("_count")
+    if count_mask.any():
+        counts = frame.loc[count_mask].groupby(groups)["value"].agg(
+            sum_across_folds="sum", mean_per_fold="mean", folds="count").reset_index()
+        counts.to_csv(folder / "sample_counts.csv", index=False)
+    frame.loc[frame.metric == "threshold_logit"].to_csv(folder / "thresholds_by_fold.csv", index=False)
+    frame = frame.loc[~count_mask & (frame.metric != "threshold_logit")]
     # First summarize folds WITHIN each repeat. Repeat variability is a separate table.
     per_seed = frame.groupby(groups)["value"].agg(mean="mean", fold_std="std", folds="count").reset_index()
     per_seed["fold_std"] = per_seed["fold_std"].fillna(0.0)

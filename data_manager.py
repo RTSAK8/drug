@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 
 from config import Config
-from utils.hypergraph import build_binary_edges
+from utils.hypergraph import build_binary_edges, relation_schema
 from utils.preprocessing import triplet_set
 
 LOG = logging.getLogger(__name__)
@@ -81,6 +81,11 @@ class DataManager:
                             "unmapped_removed": int((~valid).sum()), "mapped": int(valid.sum())}
         if not valid.any():
             raise ValueError(f"No valid mapped triplets remain in {name}")
+        coverage = float(valid.mean())
+        self.stats[name]["mapping_fraction"] = coverage
+        if coverage < self.config.min_triplet_mapping_fraction:
+            raise ValueError(f"{name}: mapping coverage {coverage:.3%} is below configured minimum "
+                             f"{self.config.min_triplet_mapping_fraction:.3%}; inspect entity ID namespaces")
         return mapped.loc[valid].to_numpy(dtype=np.int64)
 
     def _load_relation(self, name: str, filename: str, kinds: tuple, columns: list) -> np.ndarray:
@@ -98,7 +103,8 @@ class DataManager:
             self_links += int((pairs[:, 0] == pairs[:, 1]).sum())
             pairs = pairs[pairs[:, 0] != pairs[:, 1]]
             if len(pairs):
-                # All four relations use explicitly documented undirected semantics.
+                # Canonical order follows drug < gene < disease global offsets.
+                # Optional inverse message types are assigned during graph building.
                 retained.append(np.unique(np.sort(pairs, axis=1), axis=0))
         edges = np.unique(np.concatenate(retained), axis=0) if retained else np.empty((0, 2), dtype=np.int64)
         self.stats[name] = {"raw": raw, "mapped": matched, "self_links_removed": self_links, "unique_undirected": len(edges)}
@@ -135,7 +141,8 @@ class DataManager:
         if self.config.use_relational_graph:
             for name in self.config.relations:
                 relations[name] = self._load_relation(name, *definitions[name])
-        self.edge_index, self.edge_type = build_binary_edges(relations)
+        self.edge_index, self.edge_type = build_binary_edges(relations, self.config.directional_relations)
+        self.stats["relation_schema"] = relation_schema(self.config.directional_relations)
         self.stats["typed_directed_edges"] = int(self.edge_type.numel())
         LOG.info("Loaded data: %s", self.stats)
         return self

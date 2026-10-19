@@ -2,30 +2,49 @@
 defaults:
   - _self_
   - protocol: independent_test
+  - method: paper
   - ablation: full
 
 experiment_name: full
+method_name: paper
 data_dir: dataset
 results_dir: results
 device: auto
 seeds: [42]  # Set [42,43,44,45,46] for five independent repeats.
 deterministic: true
+deterministic_strict: false
+resume_from: ""
 tasks: [gene, disease]  # Joint training, one shared checkpoint.
 epochs: 1000
 learning_rate: 0.005
 weight_decay: 1.0e-4
 eval_every: 10
+checkpoint_every: 10
 early_stopping_patience: 20
 early_stopping_min_delta: 1.0e-5
 gradient_clip_norm: 5.0
+selection_metric: mrr_filtered_query_macro
+task_weights: {gene: 1.0, disease: 1.0}
+scheduler: none
+scheduler_patience: 5
+scheduler_factor: 0.5
+min_learning_rate: 1.0e-6
 bce_weight: 0.3
 qfal_weight: 0.5
 neg_ratio: 3
 negative_filter_scope: train_only
+negative_sampling_strategy: legacy
+negative_refresh_every: 0
+min_triplet_mapping_fraction: 0.0
 encoder_output_dim: 128
 hidden_dim: 512
 feature_dropout: 0.3
 decoder_dropout: 0.4
+decoder_normalization: batch
+decoder_interactions: false
+feature_residual: false
+final_layer_residual: false
+directional_relations: false
 use_hypergraph: true
 use_relational_graph: true
 hgnn_use_residual: true
@@ -44,6 +63,8 @@ qfal_false_negative_weight: 0.05
 qfal_self_adversarial: true
 qfal_adversarial_temperature: 1.0
 qfal_max_queries: 256
+qfal_query_sampling: random
+qfal_positive_mode: attenuate
 ranking_query_batch_size: 16
 ranking_candidate_batch_size: 128
 prediction_batch_size: 8192

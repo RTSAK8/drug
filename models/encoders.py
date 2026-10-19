@@ -50,23 +50,27 @@ class HypergraphLayer(nn.Module):
 
 
 class GraphBranch(nn.Module):
-    """Three layers; gated projected residuals only on the first two layers."""
+    """Three layers; optional final-layer and initial-feature residual paths."""
 
     def __init__(self, input_dim: int, hidden_dim: int, dropout: float, residual: bool,
-                 kind: str, normalization: str = "symmetric", hyperedge_dropout: float = 0.0):
+                 kind: str, normalization: str = "symmetric", hyperedge_dropout: float = 0.0,
+                 final_residual: bool = False, feature_residual: bool = False, num_relations: int = 4):
         super().__init__()
         self.kind = kind
         self.hyperedge_dropout = hyperedge_dropout
         dims = [input_dim, hidden_dim, hidden_dim // 2, hidden_dim // 4]
         self.convs = nn.ModuleList([
             HypergraphLayer(dims[i], dims[i+1], normalization) if kind == "hypergraph"
-            else RGCNConv(dims[i], dims[i+1], num_relations=4)
+            else RGCNConv(dims[i], dims[i+1], num_relations=num_relations)
             for i in range(3)
         ])
         self.norms = nn.ModuleList([nn.BatchNorm1d(dims[i+1]) for i in range(3)])
         self.residual = residual
-        self.projections = nn.ModuleList([nn.Linear(dims[i], dims[i+1], bias=False) for i in range(2)]) if residual else nn.ModuleList()
-        self.gates = nn.ParameterList([nn.Parameter(torch.tensor(math.log(0.2 / 0.8))) for _ in range(2)]) if residual else nn.ParameterList()
+        residual_layers = 3 if final_residual else 2
+        self.projections = nn.ModuleList([nn.Linear(dims[i], dims[i+1], bias=False) for i in range(residual_layers)]) if residual else nn.ModuleList()
+        self.gates = nn.ParameterList([nn.Parameter(torch.tensor(math.log(0.2 / 0.8))) for _ in range(residual_layers)]) if residual else nn.ParameterList()
+        # Disabling this branch's residuals disables ALL its residual paths.
+        self.initial_projection = nn.Linear(input_dim, dims[-1], bias=False) if residual and feature_residual else None
         self.dropout = nn.Dropout(dropout)
 
     def _drop_hyperedges(self, incidence: torch.Tensor) -> torch.Tensor:
@@ -82,15 +86,16 @@ class GraphBranch(nn.Module):
         return torch.stack([retained[0], compact])
 
     def forward(self, x: torch.Tensor, edges: torch.Tensor, edge_types=None) -> torch.Tensor:
+        initial = x
         if self.kind == "hypergraph":
             edges = self._drop_hyperedges(edges)
         for i, (conv, norm) in enumerate(zip(self.convs, self.norms)):
             incoming = x
             x = conv(x, edges) if self.kind == "hypergraph" else conv(x, edges, edge_types)
             x = norm(x)
-            if self.residual and i < 2:
+            if self.residual and i < len(self.projections):
                 x = x + torch.sigmoid(self.gates[i]) * self.projections[i](incoming)
             x = torch.relu(x)
             if i < 2:
                 x = self.dropout(x)
-        return x
+        return x if self.initial_projection is None else x + self.initial_projection(initial)

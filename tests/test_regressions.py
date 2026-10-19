@@ -12,7 +12,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import Config
-from models import HGNN
+from models.hgnn import HGNN
 from models.encoders import HypergraphLayer
 from models.losses import qfal_loss
 from utils.hypergraph import build_hypergraph
