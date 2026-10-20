@@ -1,78 +1,79 @@
+# Complete paper model. Protocol and ablation overlays follow the shared defaults.
+defaults:
+  - _self_
+  - protocol: independent_test
+  - method: paper
+  - ablation: full
+
+experiment_name: full
+method_name: paper
+data_dir: dataset
+results_dir: results
+device: auto
+seeds: [42]  # Set [42,43,44,45,46] for five independent repeats.
+deterministic: true
+deterministic_strict: false
+resume_from: ""
+tasks: [gene, disease]  # Joint training, one shared checkpoint.
 epochs: 1000
 learning_rate: 0.005
-alpha: 0.4
-L2: 1e-4
-loss_type:
-  - qccl
-
-data_dir: ./dataset
-results_dir: ./results
-
-# 评估协议：independent_test/train_test 使用 triplets.csv 训练、drugbank_triplets.csv 测试；
-# cross_validation 使用 triplets.csv 做 K 折交叉验证。
-eval_protocol: independent_test
+weight_decay: 1.0e-4
+eval_every: 10
+checkpoint_every: 10
+early_stopping_patience: 20
+early_stopping_min_delta: 1.0e-5
+gradient_clip_norm: 5.0
+selection_metric: mrr_filtered_query_macro
+task_weights: {gene: 1.0, disease: 1.0}
+scheduler: none
+scheduler_patience: 5
+scheduler_factor: 0.5
+min_learning_rate: 1.0e-6
+bce_weight: 0.3
+qfal_weight: 0.5
 neg_ratio: 3
-max_attempts: 50
-
-n_splits: 5
-random_state: 42
-
+negative_filter_scope: train_only
+negative_sampling_strategy: legacy
+negative_refresh_every: 0
+min_triplet_mapping_fraction: 0.0
 encoder_output_dim: 128
 hidden_dim: 512
-
+feature_dropout: 0.3
+decoder_dropout: 0.4
+decoder_normalization: batch
+decoder_interactions: false
+feature_residual: false
+final_layer_residual: false
+directional_relations: false
+use_hypergraph: true
+use_relational_graph: true
 hgnn_use_residual: true
-hgnn_jk: last
-hgnn_norm: batch
-hgnn_hyperedge_dropout: 0.0
-hgnn_dropout: 0.4
-
 rgcn_use_residual: true
+hgnn_dropout: 0.4
 rgcn_dropout: 0.4
+hgnn_hyperedge_dropout: 0.0
+hypergraph_normalization: symmetric  # Paper equation (4).
 fusion_method: concat
-
-qccl_temperature: 0.3
-qccl_gene_query_temperature: -1.0
-qccl_drug_query_temperature: -1.0
-qccl_disease_query_temperature: -1.0
-qccl_asymmetric_norm_mode: symmetric
-
-qccl_multi_positive: false
-qccl_hardness_reweight: false
-qccl_hardness_alpha: 1.0
-qccl_hardness_temperature: 1.0
-qccl_query_hardness_reweight: false
-qccl_query_hardness_alpha: 1.0
-qccl_query_hardness_temperature: 1.0
-
-qccl_three_pool_schedule: false
-qccl_pool_easy_quantile: 0.33
-qccl_pool_hard_quantile: 0.66
-qccl_pool_start_weights: [1.25, 1.0, 0.75]
-qccl_pool_end_weights: [0.75, 1.0, 1.25]
-
-qccl_memory_queue: false
-qccl_memory_queue_size: 0
-qccl_memory_queue_warmup_progress: 0.0
-qccl_memory_queue_negatives_per_query: 0
-
-qccl_cond_dim_ratio: 0.5
-qccl_num_layers: 2
-qccl_query_dropout: 0.3
-qccl_film_layer_norm: false
-
-use_wandb: true
-wandb_project: Drug Prediction
+relations: [ppi, dpi, ddi, protein_disease]
+feature_dims: {drug: 768, gene: 1024, disease: 768}
+qfal_num_negatives: 64
+qfal_temperature: 0.2
+qfal_known_positive_masking: true
+qfal_false_negative_weight: 0.05
+qfal_self_adversarial: true
+qfal_adversarial_temperature: 1.0
+qfal_max_queries: 256
+qfal_query_sampling: random
+qfal_positive_mode: attenuate
+ranking_query_batch_size: 16
+ranking_candidate_batch_size: 128
+prediction_batch_size: 8192
+ranking_tie_policy: average
+hit_k: [1, 3, 5]
+recall_k: [1, 5, 10]
+use_wandb: false
+wandb_project: drug-triplet-completion
 wandb_entity: ""
-wandb_name_prefix: ours
-wandb_run_index: 1
-
-graph_ablation_configs:
-  WithoutGeneHyperedges:
-    - ppi
-    - dpi
-    - ddi
-    - protein_disease
-
 hydra:
   run:
     dir: .

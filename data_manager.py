@@ -1,194 +1,152 @@
-"""
-数据管理器 - 加载和处理药物-基因-疾病数据
-"""
+"""Strict CSV loading with stable string IDs, feature validation, and provenance."""
+
+import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-import os
-from typing import Dict, List, Tuple, Optional
-from config import Config
-from utils.runtime import get_device
 
-device = get_device()
+from config import Config
+from utils.hypergraph import build_binary_edges, relation_schema
+from utils.preprocessing import triplet_set
+
+LOG = logging.getLogger(__name__)
+TRIPLET_COLUMNS = ["Drug_ID", "Gene_ID", "Disease_ID"]
 
 
 class DataManager:
     def __init__(self, config: Config):
         self.config = config
-        self.drug_to_idx = {}
-        self.gene_to_idx = {}
-        self.disease_to_idx = {}
-        self.gene_offset = 0
-        self.disease_offset = 0
+        self.root = Path(config.data_dir)
+        self.maps = {}
+        self.offsets = {}
+        self.counts = {}
+        self.features = {}
+        self.stats = {}
+        self.rejected = {}
+        self.source_files = []
 
-    def load_all_data(self) -> Dict[str, pd.DataFrame]:
-        """加载所有数据文件"""
-        data_files = {
-            "drug": self.config.drug_file,
-            "gene": self.config.gene_file,
-            "disease": self.config.disease_file,
-            "triplets": self.config.triplets_file,
-            "drugbank_triplets": getattr(self.config, "drugbank_triplets_file", ""),
-            "ppi": self.config.ppi_file,
-            "dpi": self.config.dpi_file,
-            "ddi": self.config.ddi_file,
-            "protein_disease": self.config.protein_disease_file,
-            "gene_hyperedges": self.config.gene_hyperedges_file,
-        }
+    def _path(self, name: str) -> Path:
+        path = self.root / name
+        if not path.is_file():
+            raise FileNotFoundError(f"Required dataset file is missing: {path}")
+        self.source_files.append(path)
+        return path
 
-        data = {}
-        for key, filepath in data_files.items():
-            if os.path.exists(filepath):
-                data[key] = pd.read_csv(filepath)
-                print(f"加载 {key}: {data[key].shape}")
-            else:
-                print(f"警告: 文件不存在 {filepath}")
-                data[key] = pd.DataFrame()
+    @staticmethod
+    def _normalize_ids(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        missing = set(columns) - set(frame.columns)
+        if missing:
+            raise ValueError(f"Missing CSV columns: {sorted(missing)}")
+        frame = frame.copy()
+        for column in columns:
+            frame[column] = frame[column].astype("string").str.strip()
+        return frame
 
-        return data
+    def _load_features(self, kind: str, column: str):
+        path = self._path(f"{kind}_embeddings.csv")
+        frame = pd.read_csv(path, dtype={column: "string"}, keep_default_na=False)
+        frame = self._normalize_ids(frame, [column])
+        if frame[column].isna().any() or frame[column].eq("").any():
+            raise ValueError(f"Missing entity IDs in {path.name}")
+        # Exact repeated rows may be removed; conflicting vectors must not be hidden.
+        original_count = len(frame)
+        frame = frame.drop_duplicates().reset_index(drop=True)
+        if frame[column].duplicated().any():
+            raise ValueError(f"Conflicting duplicate {column} vectors in {path.name}")
+        feature_columns = [c for c in frame.columns if c != column]
+        expected = self.config.feature_dims[kind]
+        if len(feature_columns) != expected:
+            raise ValueError(f"{path.name}: expected {expected} feature columns, found {len(feature_columns)}")
+        values = frame[feature_columns].apply(pd.to_numeric, errors="raise").to_numpy(dtype=np.float32)
+        if len(values) < 2 or not np.isfinite(values).all():
+            raise ValueError(f"{path.name}: require >=2 entities and finite numeric vectors")
+        self.maps[kind] = {str(entity): index for index, entity in enumerate(frame[column])}
+        self.counts[kind] = len(frame)
+        self.features[kind] = torch.from_numpy(values)
+        self.stats[f"features_{kind}"] = {"rows_raw": original_count, "entities": len(frame), "dimension": expected}
 
-    def create_index_mappings(self, data: Dict[str, pd.DataFrame]):
-        """创建实体到索引的映射"""
-        # 药物映射
-        if not data["drug"].empty:
-            self.drug_to_idx = {d: idx for idx, d in enumerate(data["drug"]["Drug_ID"].unique())}
+    def _load_triplets(self, name: str) -> np.ndarray:
+        frame = self._normalize_ids(pd.read_csv(self._path(name), dtype="string", keep_default_na=False), TRIPLET_COLUMNS)
+        frame = frame[TRIPLET_COLUMNS]
+        initial = len(frame)
+        frame = frame.drop_duplicates().reset_index(drop=True)
+        mapped = pd.DataFrame(index=frame.index)
+        for kind, column in zip(("drug", "gene", "disease"), TRIPLET_COLUMNS):
+            mapped[column] = frame[column].map(self.maps[kind]) + self.offsets[kind]
+        valid = mapped.notna().all(axis=1)
+        self.rejected[f"{Path(name).stem}_unmapped"] = frame.loc[~valid].copy()
+        self.stats[name] = {"raw": initial, "duplicates_removed": initial-len(frame),
+                            "unmapped_removed": int((~valid).sum()), "mapped": int(valid.sum())}
+        if not valid.any():
+            raise ValueError(f"No valid mapped triplets remain in {name}")
+        coverage = float(valid.mean())
+        self.stats[name]["mapping_fraction"] = coverage
+        if coverage < self.config.min_triplet_mapping_fraction:
+            raise ValueError(f"{name}: mapping coverage {coverage:.3%} is below configured minimum "
+                             f"{self.config.min_triplet_mapping_fraction:.3%}; inspect entity ID namespaces")
+        return mapped.loc[valid].to_numpy(dtype=np.int64)
 
-        # 基因映射
-        if not data["gene"].empty:
-            self.gene_to_idx = {g: idx for idx, g in enumerate(data["gene"]["Gene_ID"].unique())}
-
-        # 疾病映射
-        if not data["disease"].empty:
-            self.disease_to_idx = {d: idx for idx, d in enumerate(data["disease"]["Disease_ID"].unique())}
-
-        # 计算偏移量
-        self.gene_offset = len(self.drug_to_idx)
-        self.disease_offset = self.gene_offset + len(self.gene_to_idx)
-
-        print(f"索引映射统计:")
-        print(f"  药物数量: {len(self.drug_to_idx)}")
-        print(f"  基因数量: {len(self.gene_to_idx)}")
-        print(f"  疾病数量: {len(self.disease_to_idx)}")
-        print(f"  基因偏移: {self.gene_offset}")
-        print(f"  疾病偏移: {self.disease_offset}")
-
-    def process_entity_features(self, df: pd.DataFrame, id_col: str, idx_mapping: Dict) -> torch.Tensor:
-        """统一的实体特征处理函数"""
-        if df.empty:
-            num_entities = len(idx_mapping)
-            num_features = 0
-            return torch.zeros((num_entities, 128)).to(device)  # 默认特征维度
-
-        processed = df.set_index(id_col).reset_index().drop_duplicates(subset=id_col, keep="first").set_index(id_col)
-        feature_cols = [c for c in processed.columns if c != id_col]
-
-        # 构建特征矩阵
-        num_entities = len(idx_mapping)
-        num_features = len(feature_cols)
-        feature_matrix = np.zeros((num_entities, num_features))
-
-        for entity, idx in idx_mapping.items():
-            if entity in processed.index:
-                entity_data = processed.loc[[entity]].head(1)
-                feature_vector = entity_data[feature_cols].values.flatten()
-                feature_matrix[idx] = feature_vector
-
-        return torch.FloatTensor(feature_matrix).to(device)
-
-    def prepare_binary_edges(self, data: Dict[str, pd.DataFrame]) -> Dict[str, np.ndarray]:
-        """准备所有二元关系边"""
-        edges = {}
-
-        # 药物-药物相互作用
-        edges["ddi"] = self._prepare_edges(data["ddi"], "Drug_ID_1", "Drug_ID_2", self.drug_to_idx, self.drug_to_idx)
-
-        # 蛋白质-蛋白质相互作用
-        edges["ppi"] = self._prepare_edges(data["ppi"], "Gene_ID_1", "Gene_ID_2", self.gene_to_idx, self.gene_to_idx)
-
-        # 药物-蛋白质相互作用
-        edges["dpi"] = self._prepare_edges(data["dpi"], "Drug_ID", "Gene_ID", self.drug_to_idx, self.gene_to_idx)
-
-        edges["protein_disease"] = self._prepare_edges(data.get("protein_disease", pd.DataFrame()), "Gene_ID", "Disease_ID", self.gene_to_idx, self.disease_to_idx)
-
-        # 基因功能超边，暂时不用
-        edges["gene_hyperedges"] = self._prepare_gene_hyperedges(data["gene_hyperedges"])
-
+    def _load_relation(self, name: str, filename: str, kinds: tuple, columns: list) -> np.ndarray:
+        path = self._path(filename)
+        retained, raw, matched, self_links = [], 0, 0, 0
+        # Large PPI/DDI files are filtered before concatenation.
+        for chunk in pd.read_csv(path, usecols=columns, dtype="string", keep_default_na=False, chunksize=200_000):
+            chunk = self._normalize_ids(chunk, columns)
+            raw += len(chunk)
+            a = chunk[columns[0]].map(self.maps[kinds[0]]) + self.offsets[kinds[0]]
+            b = chunk[columns[1]].map(self.maps[kinds[1]]) + self.offsets[kinds[1]]
+            valid = a.notna() & b.notna()
+            pairs = np.column_stack([a[valid].to_numpy(dtype=np.int64), b[valid].to_numpy(dtype=np.int64)])
+            matched += len(pairs)
+            self_links += int((pairs[:, 0] == pairs[:, 1]).sum())
+            pairs = pairs[pairs[:, 0] != pairs[:, 1]]
+            if len(pairs):
+                # Canonical order follows drug < gene < disease global offsets.
+                # Optional inverse message types are assigned during graph building.
+                retained.append(np.unique(np.sort(pairs, axis=1), axis=0))
+        edges = np.unique(np.concatenate(retained), axis=0) if retained else np.empty((0, 2), dtype=np.int64)
+        self.stats[name] = {"raw": raw, "mapped": matched, "self_links_removed": self_links, "unique_undirected": len(edges)}
+        if len(edges) == 0:
+            raise ValueError(f"Selected relation {name} has no mapped non-self edges; fix IDs or explicitly remove it from relations")
         return edges
 
-    def _prepare_edges(self, df: pd.DataFrame, col1: str, col2: str, mapper1: Dict, mapper2: Dict) -> np.ndarray:
-        """准备二元边"""
-        if df.empty or col1 not in df.columns or col2 not in df.columns:
-            return np.empty((2, 0), dtype=np.int64)
+    def load(self):
+        offset = 0
+        for kind, column in zip(("drug", "gene", "disease"), TRIPLET_COLUMNS):
+            self._load_features(kind, column)
+            self.offsets[kind] = offset
+            offset += self.counts[kind]
+        self.candidates = {kind: np.arange(self.offsets[kind], self.offsets[kind]+self.counts[kind], dtype=np.int64)
+                           for kind in ("gene", "disease")}
+        self.positives = self._load_triplets("triplets.csv")
+        self.external = np.empty((0, 3), dtype=np.int64)
+        if self.config.eval_protocol == "independent_test":
+            external = self._load_triplets("drugbank_triplets.csv")
+            known = triplet_set(self.positives)
+            overlap = np.asarray([tuple(row) in known for row in external], dtype=bool)
+            self.rejected["drugbank_overlap"] = pd.DataFrame(external[overlap], columns=TRIPLET_COLUMNS)
+            self.external = external[~overlap]
+            self.stats["drugbank_triplets.csv"].update(overlap_removed=int(overlap.sum()), final_test_count=len(self.external))
+            if len(self.external) == 0:
+                raise ValueError("External test is empty after mapping/deduplication/overlap removal")
+        definitions = {
+            "ppi": ("ppi.csv", ("gene", "gene"), ["Gene_ID_1", "Gene_ID_2"]),
+            "dpi": ("drug_protein.csv", ("drug", "gene"), ["Drug_ID", "Gene_ID"]),
+            "ddi": ("drug_drug.csv", ("drug", "drug"), ["Drug_ID_1", "Drug_ID_2"]),
+            "protein_disease": ("protein_disease.csv", ("gene", "disease"), ["Gene_ID", "Disease_ID"]),
+        }
+        relations = {}
+        if self.config.use_relational_graph:
+            for name in self.config.relations:
+                relations[name] = self._load_relation(name, *definitions[name])
+        self.edge_index, self.edge_type = build_binary_edges(relations, self.config.directional_relations)
+        self.stats["relation_schema"] = relation_schema(self.config.directional_relations)
+        self.stats["typed_directed_edges"] = int(self.edge_type.numel())
+        LOG.info("Loaded data: %s", self.stats)
+        return self
 
-        # 向量化映射
-        mapped_col1 = df[col1].map(mapper1).fillna(-1).astype(np.int64)
-        mapped_col2 = df[col2].map(mapper2).fillna(-1).astype(np.int64)
-
-        # 过滤无效映射
-        valid_mask = (mapped_col1 != -1) & (mapped_col2 != -1)
-
-        if not valid_mask.any():
-            return np.empty((2, 0), dtype=np.int64)
-
-        node1_indices = mapped_col1[valid_mask].values
-        node2_indices = mapped_col2[valid_mask].values
-
-        return np.vstack((node1_indices, node2_indices))
-
-    def _prepare_gene_hyperedges(self, df: pd.DataFrame) -> List[List[int]]:
-        """准备基因超边"""
-        if df.empty:
-            return []
-
-        hyperedges = []
-        for idx, row in df.iterrows():
-            genes_in_edge = []
-            for col in df.columns:
-                gene = row[col]
-                if pd.notna(gene) and gene != "" and gene in self.gene_to_idx:
-                    genes_in_edge.append(self.gene_to_idx[gene])
-
-            if len(genes_in_edge) >= 2:
-                hyperedges.append(genes_in_edge)
-
-        return hyperedges
-
-    def offset_binary_edges(self, edges_array: np.ndarray, entity_type1_offset: int, entity_type2_offset: int) -> Optional[np.ndarray]:
-        """对二元边进行偏移处理"""
-        if edges_array is None or edges_array.shape[1] == 0:
-            return None
-
-        offsetted_edges = edges_array.copy()
-        offsetted_edges[0, :] += entity_type1_offset
-        offsetted_edges[1, :] += entity_type2_offset
-        return offsetted_edges
-
-    def offset_gene_hyperedges(self, hyperedges: List[List[int]]) -> List[List[int]]:
-        """对基因超边进行偏移处理"""
-        if not hyperedges:
-            return []
-
-        offset_hyperedges = []
-        for hyperedge in hyperedges:
-            offset_hyperedge = [gene_id + self.gene_offset for gene_id in hyperedge]
-            offset_hyperedges.append(offset_hyperedge)
-
-        return offset_hyperedges
-
-    def get_offset_edges(self, global_edges: Dict[str, np.ndarray], include_relations: List[str]) -> Dict[str, Optional[np.ndarray]]:
-        """获取指定关系的偏移后的边"""
-        offset_edges = {}
-
-        # 根据include_relations选择性地包含边数据
-        offset_edges["ddi"] = self.offset_binary_edges(global_edges["ddi"], 0, 0) if "ddi" in include_relations else None
-
-        offset_edges["ppi"] = self.offset_binary_edges(global_edges["ppi"], self.gene_offset, self.gene_offset) if "ppi" in include_relations else None
-
-        offset_edges["dpi"] = self.offset_binary_edges(global_edges["dpi"], 0, self.gene_offset) if "dpi" in include_relations else None
-
-        offset_edges["protein_disease"] = self.offset_binary_edges(global_edges["protein_disease"], self.gene_offset, self.disease_offset) if "protein_disease" in include_relations else None
-
-        offset_edges["gene_hyperedges"] = self.offset_gene_hyperedges(global_edges["gene_hyperedges"]) if "gene_hyperedges" in include_relations else None
-
-        return offset_edges
+    def mapping_frame(self) -> pd.DataFrame:
+        return pd.DataFrame([{"entity_type": kind, "original_id": original, "global_id": local+self.offsets[kind]}
+                             for kind, mapping in self.maps.items() for original, local in mapping.items()])

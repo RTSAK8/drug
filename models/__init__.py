@@ -1,21 +1,11 @@
-"""
-模型包导出
-"""
+"""Public model API; obsolete encoder/loss exports are intentionally absent."""
 
-from .decoder import Decoder
-from .encoders import BioEncoder, HgnnEncoder, RelationalGraphEncoder
-from .hgnn import HGNN
-from .losses import integrate_qccl
-from .query_conditioning import FiLMLayer, MultiLayerFiLMConditionalEntityEncoder, QueryEncoder
+__all__ = ["HGNN"]
 
-__all__ = [
-    "BioEncoder",
-    "HgnnEncoder",
-    "RelationalGraphEncoder",
-    "Decoder",
-    "HGNN",
-    "integrate_qccl",
-    "QueryEncoder",
-    "FiLMLayer",
-    "MultiLayerFiLMConditionalEntityEncoder",
-]
+
+def __getattr__(name):
+    if name == "HGNN":
+        from .hgnn import HGNN
+
+        return HGNN
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

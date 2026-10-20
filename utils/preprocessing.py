@@ -1,88 +1,89 @@
-"""
-数据预处理工具函数
-"""
+"""Query-aware sampling. All IDs here are in the global node index space."""
+
+from collections import defaultdict
+import hashlib
 
 import numpy as np
-from typing import List
 
 
-def apply_offsets(data: np.ndarray, gene_offset: int, disease_offset: int) -> np.ndarray:
+def triplet_set(triplets: np.ndarray) -> set[tuple[int, int, int]]:
+    return {tuple(map(int, row[:3])) for row in triplets}
+
+
+def query_key(row, task: str) -> tuple[int, int]:
+    d, g, s = map(int, row[:3])
+    if task == "gene":
+        return d, s
+    if task == "disease":
+        return d, g
+    raise ValueError(f"Unsupported task: {task}")
+
+
+def answer_index(task: str) -> int:
+    if task not in {"gene", "disease"}:
+        raise ValueError(f"Unsupported task: {task}")
+    return 1 if task == "gene" else 2
+
+
+def make_triplet(key: tuple[int, int], answer: int, task: str) -> tuple[int, int, int]:
+    return (key[0], answer, key[1]) if task == "gene" else (key[0], key[1], answer)
+
+
+def answer_map(triplets, task: str) -> dict[tuple[int, int], set[int]]:
+    grouped = defaultdict(set)
+    index = answer_index(task)
+    for row in triplets:
+        grouped[query_key(row, task)].add(int(row[index]))
+    return dict(grouped)
+
+
+def negative_partition(triplet, seed: int) -> str:
+    """Label/task-independent 80/10/10 reservation, stable across Python processes.
+
+    The same triplet belongs to the same partition under both completion tasks.
+    This reserves future BCE draws without consulting held-out labels or samples.
     """
-    对数据应用偏移量
+    payload = f"{int(seed)}:{int(triplet[0])}:{int(triplet[1])}:{int(triplet[2])}".encode("ascii")
+    bucket = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "little") % 100
+    return "train" if bucket < 80 else ("validation" if bucket < 90 else "test")
 
-    Args:
-        data: 原始数据，形状 (n_samples, 4)
-        gene_offset: 基因偏移量
-        disease_offset: 疾病偏移量
 
-    Returns:
-        偏移后的数据
+def sample_negatives(positives: np.ndarray, candidates: np.ndarray, exclude: set,
+                     task: str, ratio: int, rng: np.random.Generator,
+                     partition: str | None = None, partition_seed: int = 0) -> tuple[np.ndarray, dict]:
+    """Sample distinct unlabeled answers without replacement; report pool exhaustion.
+
+    A query with m positive targets requests m*ratio distinct negatives. A small
+    available pool is capped explicitly rather than silently losing retries.
     """
-    if data.size == 0:
-        return data
+    if partition not in {None, "train", "validation", "test"}:
+        raise ValueError(f"Unknown candidate reservation: {partition}")
+    blocked = answer_map(exclude | triplet_set(positives), task)
+    groups = answer_map(positives, task)
+    rows, exhausted = [], []
+    requested = 0
+    for key in sorted(groups):
+        wanted = len(groups[key]) * ratio
+        requested += wanted
+        unavailable = blocked.get(key, set())
+        available = np.asarray([x for x in candidates if int(x) not in unavailable and (
+            partition is None or negative_partition(make_triplet(key, int(x), task), partition_seed) == partition
+        )], dtype=np.int64)
+        count = min(wanted, len(available))
+        if count < wanted:
+            exhausted.append({"query": list(key), "requested": wanted, "available": len(available)})
+        if count:
+            selected = rng.choice(available, size=count, replace=False)
+            rows.extend(make_triplet(key, int(a), task) for a in selected)
+    result = np.asarray(rows, dtype=np.int64).reshape(-1, 3)
+    return result, {"requested": requested, "actual": len(result), "shortfall": requested-len(result),
+                    "exhausted_queries": exhausted, "partition": partition, "partition_seed": partition_seed}
 
-    data = data.copy()
-    data[:, 1] += gene_offset  # 基因ID + 偏移
-    data[:, 2] += disease_offset  # 疾病ID + 偏移
-    return data
 
-
-def generate_negatives_for_fold(
-    pos_samples: np.ndarray,
-    drug_pool: List[int],
-    gene_pool: List[int],
-    disease_pool: List[int],
-    global_exclude: set,
-    replace_dims: List[str],
-    neg_ratio: int = 3,
-) -> np.ndarray:
-    """
-    为当前fold生成负样本
-
-    Args:
-        pos_samples: 正样本
-        drug_pool: 药物候选池
-        gene_pool: 基因候选池
-        disease_pool: 疾病候选池
-        global_exclude: 全局排除集合
-        replace_dims: 替换维度
-        neg_ratio: 负样本比例
-
-    Returns:
-        负样本数组
-    """
-    negatives = []
-    local_exclude = set(tuple(row[:3]) for row in pos_samples)
-
-    for sample in pos_samples:
-        d, g, c = sample[:3]
-
-        # 生成药物维度负样本
-        if "drug" in replace_dims and len(drug_pool) > 1:
-            for _ in range(neg_ratio):
-                new_d = np.random.choice([x for x in drug_pool if x != d])
-                triplet = (new_d, g, c)
-                if triplet not in local_exclude and triplet not in global_exclude:
-                    negatives.append([new_d, g, c, 0])
-                    local_exclude.add(triplet)
-
-        # 生成基因维度负样本
-        if "gene" in replace_dims and len(gene_pool) > 1:
-            for _ in range(neg_ratio):
-                new_g = np.random.choice([x for x in gene_pool if x != g])
-                triplet = (d, new_g, c)
-                if triplet not in local_exclude and triplet not in global_exclude:
-                    negatives.append([d, new_g, c, 0])
-                    local_exclude.add(triplet)
-
-        # 生成疾病维度负样本
-        if "disease" in replace_dims and len(disease_pool) > 1:
-            for _ in range(neg_ratio):
-                new_c = np.random.choice([x for x in disease_pool if x != c])
-                triplet = (d, g, new_c)
-                if triplet not in local_exclude and triplet not in global_exclude:
-                    negatives.append([d, g, new_c, 0])
-                    local_exclude.add(triplet)
-
-    global_exclude.update(local_exclude)
-    return np.array(negatives) if negatives else np.empty((0, 4))
+def labelled_data(positives: np.ndarray, negatives: np.ndarray) -> np.ndarray:
+    if len(positives) == 0 or len(negatives) == 0:
+        raise ValueError("Classification requires both positives and sampled negatives; inspect sampling_stats.json")
+    return np.concatenate([
+        np.column_stack([positives, np.ones(len(positives), dtype=np.int64)]),
+        np.column_stack([negatives, np.zeros(len(negatives), dtype=np.int64)]),
+    ]).astype(np.int64)
