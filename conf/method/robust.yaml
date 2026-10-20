@@ -1,0 +1,4 @@
+# @package _global_
+# Noise-tolerant objective; q=0.2 is a starting setting, not a validated optimum.
+method_name: robust
+unlabeled_loss_q: 0.2
