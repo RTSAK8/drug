@@ -1,0 +1,3 @@
+# @package _global_
+method_name: layer_norm
+decoder_normalization: layer

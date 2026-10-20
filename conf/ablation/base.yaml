@@ -1,0 +1,5 @@
+# @package _global_
+# Operational Base: hypergraph + BCE. Paper Base details were not fully specified.
+experiment_name: base
+use_relational_graph: false
+qfal_weight: 0.0

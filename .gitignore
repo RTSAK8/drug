@@ -4,3 +4,8 @@ dataset/
 .vscode/
 wandb/
 logs/
+/.idea/inspectionProfiles/profiles_settings.xml
+/.idea/.gitignore
+/.idea/drug.iml
+/.idea/modules.xml
+/.idea/vcs.xml

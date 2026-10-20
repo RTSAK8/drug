@@ -1,0 +1,3 @@
+# @package _global_
+# Complete paper architecture/loss; enhancements are explicit opt-ins.
+method_name: paper

@@ -1,0 +1,3 @@
+# @package _global_
+experiment_name: no_qfal
+qfal_weight: 0.0

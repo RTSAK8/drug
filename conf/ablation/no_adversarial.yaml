@@ -1,0 +1,3 @@
+# @package _global_
+experiment_name: no_adversarial
+qfal_self_adversarial: false

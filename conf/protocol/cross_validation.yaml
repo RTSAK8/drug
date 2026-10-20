@@ -1,0 +1,4 @@
+# @package _global_
+eval_protocol: cross_validation
+n_splits: 5
+validation_fraction: 0.15  # Inner validation from each outer training fold.

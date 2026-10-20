@@ -1,0 +1,4 @@
+# @package _global_
+experiment_name: feature_only
+use_hypergraph: false
+use_relational_graph: false
